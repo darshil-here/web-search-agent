@@ -87,7 +87,7 @@ of workloads.
 **Class:** scope
 **Locus:** prompt
 **Fix:** "Answer the question asked. Mention adjacent releases only if the user asks."
-**Status:** open
+**Status:** prompt fixed, unenforced
 **Eval:** scope-001
 **Evidence:**
 ```
@@ -95,7 +95,8 @@ of workloads.
 - **Latest Alpha:** v27.0.0-alpha.0.1.0 — experimental/early release, not for production
 ```
 Not reproduced on `2026-11-17`: the same question returned only the LTS line.
-Still marked open because the rule is prompt-only, not enforced.
+The rule is now in the system prompt verbatim; nothing enforces it, so the
+status is "prompt fixed", not "fixed".
 
 ## F-006 — Cited a source without checking its recency
 **Input:** "What is the current price of the ChatGPT Plus subscription?"
@@ -104,6 +105,7 @@ Still marked open because the rule is prompt-only, not enforced.
 launch-era article and a 2026 piece about a separate Pro tier.
 **Class:** source recency
 **Locus:** pipeline
+**Status:** open
 **Eval:** recency-001
 **Evidence:** result set mixed 2023 launch coverage with 2026 pricing coverage —
 no source date was extracted, so the answer could not prefer the fresher one.
@@ -117,7 +119,8 @@ given anyway, after wasted work.
 **Class:** capability self-knowledge
 **Locus:** prompt now, memory later
 **Eval:** memory-abstain-001
-**Evidence:**
+**Status:** fixed (notebook)
+**Evidence:** before —
 ```
 [tool] web_search(conversation history retrieve previous chat 3 November user asks)
 [result] 5 hits
@@ -126,8 +129,14 @@ FINAL:
 I can't see your other conversations or chat history from 3 November in this chat.
 ```
 The answer was right; the search was pure waste and a sign the model does not
-know what it is. Left open until the notebook exists, then it becomes a
-retrieval path instead of a refusal.
+know what it is. After the notebook, same question, no tool call:
+```
+--- step 0, 2 items ---
+FINAL:
+You didn't ask me anything on 3 November; there are no turns recorded for that date.
+```
+One step, zero searches, and the abstention is backed by an empty query result
+rather than by the model's imagination.
 
 ## F-008 — Rule and behavior disagree about years
 **Input:** comparison queries
