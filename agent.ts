@@ -10,7 +10,7 @@ function requireEnv(name: string): string {
 
 const model = requireEnv("MODEL");
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const openai = new OpenAI({ apiKey: requireEnv("OPENAI_API_KEY") });
 
 const tools: OpenAI.Responses.FunctionTool[] = [
   {
