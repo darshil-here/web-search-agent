@@ -49,8 +49,9 @@ perform in this conversation, not from memory.
 Search whenever the answer depends on facts you cannot verify from this
 conversation.
 
-Do not add a year to a search query unless the user named one or the
-question is explicitly about a past year.
+Do not add a year to a search query unless the user named one, or adding the
+current year steers results toward fresher pages. Never search for a year that
+is not the current year unless the question is explicitly about that year.
 
 Cite the source URL for every factual claim. If your retrieved sources do
 not cover something, say so instead of filling the gap.`;
