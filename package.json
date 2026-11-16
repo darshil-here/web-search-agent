@@ -5,12 +5,18 @@
   "scripts": {
     "start": "tsx --env-file=.env agent.ts",
     "dev": "tsx --env-file=.env agent.ts",
-    "trace": "npm start --"
+    "trace": "npm start --",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test dates.test.ts",
+    "db:check": "tsx scripts/db-check.ts",
+    "db:reset": "rm -f data/agent.db data/agent.db-wal data/agent.db-shm"
   },
   "dependencies": {
+    "better-sqlite3": "^13.2.0",
     "openai": "^7.57.0"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^24.0.0",
     "tsx": "^4.20.0",
     "typescript": "^5.9.0"
