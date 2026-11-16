@@ -1,5 +1,12 @@
 // agent.ts
+import { createInterface } from "node:readline";
 import OpenAI from "openai";
+import { openDb, saveTurn } from "./db.js";
+import { assertTimeZone, describeNow, localDateInTz } from "./dates.js";
+import {
+  buildNotebook,
+  type NotebookContext,
+} from "./notebook.js";
 import { Tracer, promptVersion } from "./trace.js";
 
 function requireEnv(name: string): string {
@@ -20,7 +27,16 @@ if (!Number.isInteger(MAX_STEPS) || MAX_STEPS < 1) {
   );
 }
 
+// "local" is a single-user CLI default. The column exists for the day there is
+// more than one conversation; until then, do not pretend there is a session
+// manager, just read the env var.
+const SESSION_ID = process.env.SESSION_ID ?? "local";
+const TIME_ZONE = process.env.USER_TZ ?? "UTC";
+assertTimeZone(TIME_ZONE);
+
 export type StopReason = "answered" | "budget";
+
+type Context = NotebookContext;
 
 const openai = new OpenAI({ apiKey: requireEnv("OPENAI_API_KEY") });
 
@@ -39,7 +55,7 @@ const tools: OpenAI.Responses.FunctionTool[] = [
   },
 ];
 
-const SYSTEM_TEMPLATE = `You are a research assistant. Today is {{WEEKDAY}}, {{DATE}} ({{ISO}}).
+const SYSTEM_TEMPLATE = `You are a research assistant. Today is {{WEEKDAY}}, {{DATE}} ({{ISO}}). The user's timezone is {{TZ}}.
 
 Your training data ends before this date. Never assume the current year,
 price, version, or availability from memory. Any question that depends on
@@ -47,54 +63,30 @@ price, version, or availability from memory. Any question that depends on
 perform in this conversation, not from memory.
 
 Search whenever the answer depends on facts you cannot verify from this
-conversation.
-
-Do not add a year to a search query unless the user named one, or adding the
-current year steers results toward fresher pages. Never search for a year that
-is not the current year unless the question is explicitly about that year.
+conversation. Do not add a year to a search query unless the user named one,
+or adding the current year steers results toward fresher pages. Never search
+for a year that is not the current year unless the question is explicitly
+about that year.
 
 Cite the source URL for every factual claim. If your retrieved sources do
-not cover something, say so instead of filling the gap.`;
+not cover something, say so instead of filling the gap. Answer the question
+asked; mention adjacent versions, tiers or releases only if the user asks.
 
-const WEEKDAYS = [
-  "Sunday",
-  "Monday",
-  "Tuesday",
-  "Wednesday",
-  "Thursday",
-  "Friday",
-  "Saturday",
-];
+You may be given a <notebook> block with earlier turns from this conversation.
+It is your only memory: you cannot see anything the user said outside it.
+- Never search the web for the user's own questions or chat history.
+- If the notebook says there are no turns on a date, say there are none.
+  Never invent a question or an answer that is not in it.
+- If the user asks whether an earlier answer is still correct, treat that
+  answer as a claim to re-check, not as established fact.`;
 
-const MONTHS = [
-  "January",
-  "February",
-  "March",
-  "April",
-  "May",
-  "June",
-  "July",
-  "August",
-  "September",
-  "October",
-  "November",
-  "December",
-];
-
-function pad2(value: number): string {
-  return String(value).padStart(2, "0");
-}
-
-function renderSystemPrompt(now: Date): string {
-  const weekday = WEEKDAYS[now.getDay()];
-  const date = `${now.getDate()} ${MONTHS[now.getMonth()]} ${now.getFullYear()}`;
-  const iso = `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(
-    now.getDate()
-  )}`;
+function renderSystemPrompt(now: Date, timeZone: string): string {
+  const { iso, human, weekday } = describeNow(now, timeZone);
 
   return SYSTEM_TEMPLATE.replaceAll("{{WEEKDAY}}", weekday)
-    .replaceAll("{{DATE}}", date)
-    .replaceAll("{{ISO}}", iso);
+    .replaceAll("{{DATE}}", human)
+    .replaceAll("{{ISO}}", iso)
+    .replaceAll("{{TZ}}", timeZone);
 }
 
 async function webSearch(query: string) {
@@ -116,19 +108,47 @@ async function webSearch(query: string) {
 }
 
 async function turn(
-  userText: string
+  userText: string,
+  ctx: Context
 ): Promise<{ answer: string; stopReason: StopReason }> {
-  // Rendered once per run so every step and the trace see the same instant.
-  const instructions = renderSystemPrompt(new Date());
+  // Rendered once per turn so every step and the trace see the same instant.
+  const now = new Date();
+  const instructions = renderSystemPrompt(now, ctx.timeZone);
   const tracer = new Tracer(userText);
   tracer.runStart({
     model,
-    command: `npm start -- ${JSON.stringify(userText)}`,
+    command:
+      process.argv[2] !== undefined
+        ? `npm start -- ${JSON.stringify(userText)}`
+        : "npm run dev (repl)",
     promptVersion: promptVersion(SYSTEM_TEMPLATE),
     systemPrompt: instructions,
+    sessionId: ctx.sessionId,
+    timeZone: ctx.timeZone,
+  });
+
+  // Read the notebook before writing the current question, or the model would
+  // be handed its own prompt back as "memory".
+  const notebook = buildNotebook(ctx, userText, now);
+  tracer.recall({
+    mode: notebook.mode,
+    refs: notebook.refs.map((ref) => ref.label),
+    dates: notebook.dates,
+    rows: notebook.rows,
+    bytes: notebook.bytes,
+    truncated: notebook.truncated,
+  });
+
+  saveTurn(ctx.db, {
+    sessionId: ctx.sessionId,
+    role: "user",
+    content: userText,
+    createdAt: now.toISOString(),
+    localDate: localDateInTz(now, ctx.timeZone),
   });
 
   const input: OpenAI.Responses.ResponseInputItem[] = [
+    { role: "developer", content: notebook.text },
     { role: "user", content: userText },
   ];
 
@@ -190,6 +210,17 @@ async function turn(
           totalTokens,
           stopReason: "answered",
         });
+
+        if (response.output_text.trim() !== "") {
+          saveTurn(ctx.db, {
+            sessionId: ctx.sessionId,
+            role: "assistant",
+            content: response.output_text,
+            createdAt: new Date().toISOString(),
+            localDate: localDateInTz(new Date(), ctx.timeZone),
+          });
+        }
+
         return { answer: response.output_text, stopReason: "answered" };
       }
 
@@ -242,7 +273,54 @@ async function turn(
   }
 }
 
-const result = await turn(
-  process.argv[2] ?? "What is the latest stable Node.js version?"
-);
-if (result.stopReason !== "answered") process.exitCode = 1;
+async function chat(ctx: Context): Promise<void> {
+  const interactive = process.stdin.isTTY === true;
+  const prompt = interactive ? "you> " : "";
+
+  console.log(
+    `session "${ctx.sessionId}", timezone ${ctx.timeZone}, model ${model}. ` +
+      `Type "exit" to stop.`
+  );
+  process.stdout.write(prompt);
+
+  const rl = createInterface({
+    input: process.stdin,
+    output: process.stdout,
+    terminal: interactive,
+  });
+
+  for await (const raw of rl) {
+    const line = raw.trim();
+    if (line === "exit" || line === "quit") break;
+    if (line === "") {
+      process.stdout.write(prompt);
+      continue;
+    }
+
+    try {
+      const result = await turn(line, ctx);
+      if (result.stopReason !== "answered") {
+        console.error("(no answer: step budget exhausted, see the trace)");
+      }
+    } catch (err) {
+      // A failed turn must not kill the session; the notebook is still valid.
+      console.error(`\nerror: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    process.stdout.write(prompt);
+  }
+}
+
+const db = openDb();
+const ctx: Context = { db, sessionId: SESSION_ID, timeZone: TIME_ZONE };
+
+try {
+  if (process.argv[2] !== undefined) {
+    const result = await turn(process.argv[2], ctx);
+    if (result.stopReason !== "answered") process.exitCode = 1;
+  } else {
+    await chat(ctx);
+  }
+} finally {
+  db.close();
+}

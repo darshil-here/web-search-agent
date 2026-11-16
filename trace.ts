@@ -23,6 +23,17 @@ type RunStart = {
   command: string;
   promptVersion: string;
   systemPrompt: string;
+  sessionId: string;
+  timeZone: string;
+};
+
+type Recall = {
+  mode: "dates" | "recent";
+  refs: string[];
+  dates: string[];
+  rows: number;
+  bytes: number;
+  truncated: boolean;
 };
 
 type LlmCall = {
@@ -100,6 +111,7 @@ export class Tracer {
   private readonly originalLog = console.log.bind(console);
   private meta: RunStart | undefined;
   private finalInfo: Final | undefined;
+  private recallInfo: Recall | undefined;
   private flushedPath: string | undefined;
 
   constructor(question: string) {
@@ -114,6 +126,8 @@ export class Tracer {
       ts: new Date().toISOString(),
       model: meta.model,
       command: meta.command,
+      sessionId: meta.sessionId,
+      timeZone: meta.timeZone,
       promptVersion: meta.promptVersion,
       systemPrompt: meta.systemPrompt.slice(0, 4000),
     });
@@ -132,6 +146,11 @@ export class Tracer {
       ts: new Date().toISOString(),
       ...call,
     });
+  }
+
+  recall(info: Recall): void {
+    this.recallInfo = info;
+    this.events.push({ type: "recall", ts: new Date().toISOString(), ...info });
   }
 
   toolCall(call: ToolCall): void {
@@ -208,6 +227,8 @@ export class Tracer {
       command: "unknown",
       promptVersion: "unknown",
       systemPrompt: "",
+      sessionId: "unknown",
+      timeZone: "unknown",
     };
 
     const rows = this.llmCalls.map((call) => {
@@ -248,6 +269,8 @@ export class Tracer {
       "---",
       `date: ${datePart(this.startedAt)}`,
       `model: ${JSON.stringify(meta.model)}`,
+      `session: ${JSON.stringify(meta.sessionId)}`,
+      `timezone: ${JSON.stringify(meta.timeZone)}`,
       `command: ${JSON.stringify(meta.command)}`,
       `prompt_version: ${JSON.stringify(meta.promptVersion)}`,
       `steps: ${this.llmCalls.length}`,
@@ -287,6 +310,23 @@ export class Tracer {
     lines.push(
       `| **total** | **${totals.llmMs}** | **${totals.toolsMs}** | **${totals.toolCalls}** | **${totals.prompt}** | **${totals.completion}** | **${totals.total}** |`
     );
+
+    if (this.recallInfo) {
+      const recall = this.recallInfo;
+      lines.push(
+        "",
+        "## Notebook",
+        "",
+        `| mode | rows | bytes | truncated |`,
+        "|------|-----:|------:|:----------|",
+        `| ${recall.mode} | ${recall.rows} | ${recall.bytes} | ${recall.truncated} |`,
+        ""
+      );
+      if (recall.refs.length > 0) {
+        lines.push(`Dates parsed: ${recall.refs.join(", ")}`, "");
+        lines.push(`Dates queried: ${recall.dates.join(", ") || "none"}`, "");
+      }
+    }
 
     if (this.finalInfo?.stopReason === "budget") {
       lines.push(
