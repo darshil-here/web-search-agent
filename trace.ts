@@ -47,6 +47,11 @@ type Final = {
   totalTokens: number;
 };
 
+type TraceError = {
+  step: number;
+  message: string;
+};
+
 type TraceEvent = {
   type: string;
   ts: string;
@@ -90,6 +95,7 @@ export class Tracer {
   private readonly llmCalls: LlmCall[] = [];
   private readonly toolCalls: ToolCall[] = [];
   private readonly events: TraceEvent[] = [];
+  private readonly errors: TraceError[] = [];
   private readonly originalLog = console.log.bind(console);
   private meta: RunStart | undefined;
   private finalInfo: Final | undefined;
@@ -151,6 +157,16 @@ export class Tracer {
       type: "final",
       ts: new Date().toISOString(),
       ...info,
+    });
+  }
+
+  error(info: TraceError): void {
+    this.errors.push(info);
+    this.events.push({
+      type: "error",
+      ts: new Date().toISOString(),
+      step: info.step,
+      message: info.message,
     });
   }
 
@@ -236,7 +252,7 @@ export class Tracer {
       `  llm: ${totals.llmMs}`,
       `  tools: ${totals.toolsMs}`,
       `  total: ${totalMs}`,
-      "verdict: unset",
+      `verdict: ${this.errors.length > 0 ? "error" : "unset"}`,
       "failures: []",
       "---",
       "",
@@ -261,11 +277,17 @@ export class Tracer {
     }
 
     lines.push(
-      `| **total** | **${totals.llmMs}** | **${totals.toolsMs}** | **${totals.toolCalls}** | **${totals.prompt}** | **${totals.completion}** | **${totals.total}** |`,
-      "",
-      "## Sources",
-      ""
+      `| **total** | **${totals.llmMs}** | **${totals.toolsMs}** | **${totals.toolCalls}** | **${totals.prompt}** | **${totals.completion}** | **${totals.total}** |`
     );
+
+    if (this.errors.length > 0) {
+      lines.push("", "## Error", "");
+      for (const error of this.errors) {
+        lines.push(`**Step ${error.step}:**`, "", "````", error.message, "````", "");
+      }
+    }
+
+    lines.push("", "## Sources", "");
 
     if (this.toolCalls.length === 0) {
       lines.push("_No tool calls._");

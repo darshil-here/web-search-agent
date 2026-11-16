@@ -70,13 +70,22 @@ async function turn(userText: string) {
       console.log(`\n--- step ${step}, ${input.length} items ---`);
 
       const llmStart = performance.now();
-      const response = await openai.responses.create({
-        model,
-        instructions,
-        input,
-        tools,
-        reasoning: { effort: "low" },
-      });
+      let response: OpenAI.Responses.Response;
+      try {
+        response = await openai.responses.create({
+          model,
+          instructions,
+          input,
+          tools,
+          reasoning: { effort: "low" },
+        });
+      } catch (err) {
+        tracer.error({
+          step,
+          message: err instanceof Error ? err.message : String(err),
+        });
+        throw err;
+      }
       const llmMs = performance.now() - llmStart;
 
       if (!response.usage) throw new Error(`No usage returned for step ${step}`);
