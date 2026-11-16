@@ -59,3 +59,31 @@
 **Fix:** "Answer the question asked. Mention adjacent releases only if the user asks."
 **Status:** open
 **Eval:** scope-001
+
+## F-006 — Cited a source without checking its recency
+**Input:** "What is the current price of the ChatGPT Plus subscription?"
+**Expected:** prefer the official pricing page; note if the source has no visible date.
+**Actual:** asserted $20 citing the Help Center, while results also included a
+launch-era article and a 2026 piece about a separate Pro tier.
+**Class:** source recency
+**Locus:** pipeline
+**Eval:** recency-001
+
+## F-007 — Searched the web for its own conversation history
+**Input:** "What did I ask you on 3 November?"
+**Expected:** state immediately that it has no memory of past conversations.
+**Actual:** web_search("conversation history retrieve previous chat 3 November
+user asks"); results were Slack docs and a YouTube tutorial. Correct answer
+given anyway, after wasted work.
+**Class:** capability self-knowledge
+**Locus:** prompt now, memory later
+**Eval:** memory-abstain-001
+
+## F-008 — Rule and behavior disagree about years
+**Input:** comparison queries
+**Actual:** queries appended "2026". The prompt says not to add a year.
+**Class:** rule gap
+**Locus:** prompt
+**Note:** adding the *current* year is good for freshness. The rule should
+forbid stale years only. Fix the rule, not the model.
+**Eval:** none
