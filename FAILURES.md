@@ -2,14 +2,14 @@
 
 ## F-001 — Search query anchored to a stale year
 **Date:** 2026-11-16
-**Trace:** traces/2026-11-16-node-version.md
+**Trace:** traces/2026-11-16-node-version.md, traces/2026-11-16-231921-what-is-the-latest-stable-node-js-versio.md
 **Input:** "What is the latest stable Node.js version?"
 **Expected:** tool call with no year, or with 2026.
 **Actual:** web_search("latest stable Node.js version 2024"), then a second search that rescued it.
 **Class:** temporal anchoring
 **Locus:** code
 **Fix:** inject "Today is 2026-11-16" from `new Date()` into the system prompt.
-**Status:** open
+**Status:** fixed
 **Eval:** temporal-001
 
 ## F-002 — Unsupported breadth in a comparison answer

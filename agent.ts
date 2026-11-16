@@ -27,8 +27,62 @@ const tools: OpenAI.Responses.FunctionTool[] = [
   },
 ];
 
-const instructions =
-  "You are a research assistant. Search when the question needs current facts. Always cite URLs.";
+const SYSTEM_TEMPLATE = `You are a research assistant. Today is {{WEEKDAY}}, {{DATE}} ({{ISO}}).
+
+Your training data ends before this date. Never assume the current year,
+price, version, or availability from memory. Any question that depends on
+"now", "latest", "current", or "today" must be answered from a search you
+perform in this conversation, not from memory.
+
+Search whenever the answer depends on facts you cannot verify from this
+conversation.
+
+Do not add a year to a search query unless the user named one or the
+question is explicitly about a past year.
+
+Cite the source URL for every factual claim. If your retrieved sources do
+not cover something, say so instead of filling the gap.`;
+
+const WEEKDAYS = [
+  "Sunday",
+  "Monday",
+  "Tuesday",
+  "Wednesday",
+  "Thursday",
+  "Friday",
+  "Saturday",
+];
+
+const MONTHS = [
+  "January",
+  "February",
+  "March",
+  "April",
+  "May",
+  "June",
+  "July",
+  "August",
+  "September",
+  "October",
+  "November",
+  "December",
+];
+
+function pad2(value: number): string {
+  return String(value).padStart(2, "0");
+}
+
+function renderSystemPrompt(now: Date): string {
+  const weekday = WEEKDAYS[now.getDay()];
+  const date = `${now.getDate()} ${MONTHS[now.getMonth()]} ${now.getFullYear()}`;
+  const iso = `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(
+    now.getDate()
+  )}`;
+
+  return SYSTEM_TEMPLATE.replaceAll("{{WEEKDAY}}", weekday)
+    .replaceAll("{{DATE}}", date)
+    .replaceAll("{{ISO}}", iso);
+}
 
 async function webSearch(query: string) {
   const res = await fetch("https://api.tavily.com/search", {
@@ -49,11 +103,13 @@ async function webSearch(query: string) {
 }
 
 async function turn(userText: string) {
+  // Rendered once per run so every step and the trace see the same instant.
+  const instructions = renderSystemPrompt(new Date());
   const tracer = new Tracer(userText);
   tracer.runStart({
     model,
     command: `npm start -- ${JSON.stringify(userText)}`,
-    promptVersion: promptVersion(instructions),
+    promptVersion: promptVersion(SYSTEM_TEMPLATE),
     systemPrompt: instructions,
   });
 
