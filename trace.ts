@@ -45,6 +45,7 @@ type Final = {
   content: string;
   totalMs: number;
   totalTokens: number;
+  stopReason: "answered" | "budget";
 };
 
 type TraceError = {
@@ -194,6 +195,13 @@ export class Tracer {
     return mdPath;
   }
 
+  private verdict(): string {
+    if (this.errors.length > 0) return "error";
+    if (this.finalInfo?.stopReason === "budget") return "incomplete";
+    if (this.finalInfo?.stopReason === "answered") return "ok";
+    return "unset";
+  }
+
   private renderMarkdown(): string {
     const meta = this.meta ?? {
       model: "unknown",
@@ -252,7 +260,7 @@ export class Tracer {
       `  llm: ${totals.llmMs}`,
       `  tools: ${totals.toolsMs}`,
       `  total: ${totalMs}`,
-      `verdict: ${this.errors.length > 0 ? "error" : "unset"}`,
+      `verdict: ${this.verdict()}`,
       "failures: []",
       "---",
       "",
@@ -279,6 +287,16 @@ export class Tracer {
     lines.push(
       `| **total** | **${totals.llmMs}** | **${totals.toolsMs}** | **${totals.toolCalls}** | **${totals.prompt}** | **${totals.completion}** | **${totals.total}** |`
     );
+
+    if (this.finalInfo?.stopReason === "budget") {
+      lines.push(
+        "",
+        "## Incomplete",
+        "",
+        "The loop hit its step bound with tool calls still pending. This is a failed answer, not an answer.",
+        ""
+      );
+    }
 
     if (this.errors.length > 0) {
       lines.push("", "## Error", "");

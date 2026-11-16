@@ -10,6 +10,18 @@ function requireEnv(name: string): string {
 
 const model = requireEnv("MODEL");
 
+// The loop bound exists so a search-happy model cannot run forever. It must be
+// visible when it fires: an exhausted budget is a failed answer, not an answer.
+// Env-overridable so the eval harness can test the bound for one cent.
+const MAX_STEPS = Number(process.env.MAX_STEPS ?? 5);
+if (!Number.isInteger(MAX_STEPS) || MAX_STEPS < 1) {
+  throw new Error(
+    `MAX_STEPS must be a positive integer, got ${process.env.MAX_STEPS}`
+  );
+}
+
+export type StopReason = "answered" | "budget";
+
 const openai = new OpenAI({ apiKey: requireEnv("OPENAI_API_KEY") });
 
 const tools: OpenAI.Responses.FunctionTool[] = [
@@ -102,7 +114,9 @@ async function webSearch(query: string) {
   }));
 }
 
-async function turn(userText: string) {
+async function turn(
+  userText: string
+): Promise<{ answer: string; stopReason: StopReason }> {
   // Rendered once per run so every step and the trace see the same instant.
   const instructions = renderSystemPrompt(new Date());
   const tracer = new Tracer(userText);
@@ -119,10 +133,11 @@ async function turn(userText: string) {
 
   const runStart = performance.now();
   let totalTokens = 0;
+  const searches: string[] = [];
   let lastStep = 0;
 
   try {
-    for (let step = 0; step < 5; step++) {
+    for (let step = 0; step < MAX_STEPS; step++) {
       console.log(`\n--- step ${step}, ${input.length} items ---`);
 
       const llmStart = performance.now();
@@ -172,8 +187,9 @@ async function turn(userText: string) {
           content: response.output_text,
           totalMs: performance.now() - runStart,
           totalTokens,
+          stopReason: "answered",
         });
-        return;
+        return { answer: response.output_text, stopReason: "answered" };
       }
 
       // Feed the model's own output back so it can see its reasoning and calls.
@@ -182,6 +198,7 @@ async function turn(userText: string) {
       for (const call of functionCalls) {
         const args = JSON.parse(call.arguments);
         console.log(`[tool] ${call.name}(${args.query})`);
+        searches.push(args.query);
 
         const toolStart = performance.now();
         const results = await webSearch(args.query);
@@ -202,16 +219,29 @@ async function turn(userText: string) {
       }
     }
 
-    // The loop hit its bound without a final answer; still write a trace.
+    // The loop hit its bound without a final answer. Say so, loudly, and in a
+    // shape the caller can check: silence here looks like a hang to a user and
+    // like success to a script.
+    const answer =
+      `I stopped after ${MAX_STEPS} steps without an answer. ` +
+      `Searches run: ${searches.join(" | ") || "none"}. ` +
+      `Narrow the question or ask for one part at a time.`;
+
+    console.log("\nFINAL (incomplete):\n" + answer);
     tracer.final({
       step: lastStep + 1,
       content: "",
       totalMs: performance.now() - runStart,
       totalTokens,
+      stopReason: "budget",
     });
+    return { answer, stopReason: "budget" };
   } finally {
     console.log(`trace: ${tracer.flush()}`);
   }
 }
 
-await turn(process.argv[2] ?? "What is the latest stable Node.js version?");
+const result = await turn(
+  process.argv[2] ?? "What is the latest stable Node.js version?"
+);
+if (result.stopReason !== "answered") process.exitCode = 1;
