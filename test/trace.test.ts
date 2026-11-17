@@ -7,6 +7,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Tracer } from "../src/trace.js";
+import type { GroundResult } from "../src/critic.js";
 
 function tempDir(): string {
   return mkdtempSync(join(tmpdir(), "trace-test-"));
@@ -27,6 +28,37 @@ const EXTRACT_CALL = {
   ms: 120,
   usage: { prompt: 100, completion: 20, total: 120 },
 };
+
+test("critic and scope phases render in the trace", () => {
+  const dir = tempDir();
+  try {
+    const tracer = new Tracer("test", dir);
+    const ground: GroundResult = {
+      answer: "revised",
+      statements: 3,
+      dropped: 1,
+      note: "No publication date was visible in the retrieved sources.",
+      usage: { prompt: 1, completion: 1, total: 2 },
+    };
+    tracer.critic(ground);
+    tracer.scope({ removed: ["the 27.x line is Alpha."] });
+    const original = console.log;
+    console.log = () => {};
+    let path: string;
+    try {
+      path = tracer.flush();
+    } finally {
+      console.log = original;
+    }
+    const text = readFileSync(path, "utf8");
+    assert.match(text, /## Grounding critic/);
+    assert.match(text, /## Scope/);
+    assert.match(text, /critic_statements: 3/);
+    assert.match(text, /scope_removed: 1/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test("a finished run renders its phases and an ok verdict", () => {
   const dir = tempDir();

@@ -70,6 +70,15 @@ type Final = {
   stopReason: StopReason;
 };
 
+export type CriticTrace = {
+  statements: number;
+  dropped: number;
+  note: string | null;
+  error?: string;
+};
+
+export type ScopeTrace = { removed: string[] };
+
 type TraceError = { message: string };
 
 type TraceEvent = {
@@ -120,6 +129,8 @@ export class Tracer {
   private recallInfo: Recall | undefined;
   private claimInfo: ClaimEvent | undefined;
   private recheckInfo: RecheckTrace | undefined;
+  private criticInfo: CriticTrace | undefined;
+  private scopeInfo: ScopeTrace | undefined;
   private flushedPath: string | undefined;
 
   constructor(
@@ -195,6 +206,16 @@ export class Tracer {
       ts: new Date().toISOString(),
       ...info,
     });
+  }
+
+  critic(result: CriticTrace): void {
+    this.criticInfo = result;
+    this.events.push({ type: "critic", ts: new Date().toISOString(), ...result });
+  }
+
+  scope(result: ScopeTrace): void {
+    this.scopeInfo = result;
+    this.events.push({ type: "scope", ts: new Date().toISOString(), ...result });
   }
 
   recheck(report: RecheckTrace): void {
@@ -302,6 +323,9 @@ export class Tracer {
       `tool_calls: ${this.toolCalls.length}`,
       `claims: ${this.claimInfo?.extracted ?? 0}`,
       `recheck_claims: ${this.recheckInfo?.claimsChecked ?? 0}`,
+      `critic_statements: ${this.criticInfo?.statements ?? 0}`,
+      `critic_dropped: ${this.criticInfo?.dropped ?? 0}`,
+      `scope_removed: ${this.scopeInfo?.removed.length ?? 0}`,
       "tokens:",
       `  prompt: ${totals.prompt}`,
       `  completion: ${totals.completion}`,
@@ -381,6 +405,32 @@ export class Tracer {
             `| ${tableCell(claim.subject)} | ${tableCell(claim.attribute)} | ` +
               `${tableCell(claim.value)} | ${tableCell(claim.url ?? "—")} |`
           );
+        }
+        lines.push("");
+      }
+    }
+
+    if (this.criticInfo) {
+      const c = this.criticInfo;
+      lines.push(
+        "",
+        "## Grounding critic",
+        "",
+        "| statements | dropped | note |",
+        "|----------:|--------:|------|",
+        `| ${c.statements} | ${c.dropped} | ${tableCell(c.note ?? "—")} |`,
+        ""
+      );
+      if (c.error) lines.push(`**Critic error:** ${c.error}`, "");
+    }
+
+    if (this.scopeInfo) {
+      lines.push("", "## Scope", "");
+      if (this.scopeInfo.removed.length === 0) {
+        lines.push("_Nothing removed._", "");
+      } else {
+        for (const sentence of this.scopeInfo.removed) {
+          lines.push(`- removed: ${tableCell(sentence)}`);
         }
         lines.push("");
       }
