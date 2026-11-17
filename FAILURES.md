@@ -1,8 +1,9 @@
 # Failures
 
-Trace files are not committed (they are large and machine-local), so each entry
-quotes the run it is built from. Excerpts are verbatim from
-`traces/<date>-<time>-<slug>.md`; the date and question identify the file.
+Run traces are large and machine-local, so only the ones cited here are
+committed, under `traces/curated/` and `eval/curated/`. Each entry quotes the
+run it is built from. Excerpts are verbatim from those files; the date and
+question identify the run.
 
 ## F-001 — Search query anchored to a stale year
 **Date:** 2026-11-16
@@ -105,7 +106,7 @@ naming a concept the question did not ask about. No model call, traced.
 - **Latest Alpha:** v27.0.0-alpha.0.1.0 — experimental/early release, not for production
 ```
 An early run on `2026-11-17` returned only the LTS line, but a later run the
-same day reproduced it. `traces/2026-11-17-151237-what-is-the-latest-stable-node-js-versio.md`:
+same day reproduced it. `traces/curated/2026-11-17-151237-what-is-the-latest-stable-node-js-versio.md`:
 ```
 The latest stable Node.js release is **v26.13.1 (LTS)**. The official Node.js
 releases page lists it as the latest LTS; the 27.x line is currently Alpha.
@@ -186,7 +187,7 @@ process exit code 0. A user sees a blank line; a script sees success.
 ```
 FINAL (incomplete):
 I stopped after 1 steps without an answer. Searches run: Node.js latest stable release official.
-trace: traces/2026-11-17-001730-what-is-the-latest-stable-node-js-versio.md
+trace: traces/curated/2026-11-17-001730-what-is-the-latest-stable-node-js-versio.md
 exit=1
 verdict: incomplete
 ```
@@ -218,7 +219,7 @@ rendered to the model states the mismatch explicitly.
 **Eval:** temporal-002
 **Evidence:**
 
-Before — `traces/2026-11-17-140139-what-did-i-ask-on-17-november-is-your-an.md`:
+Before — `traces/curated/2026-11-17-140139-what-did-i-ask-on-17-november-is-your-an.md`:
 ```
 | 1 | 1 | 0 | false | 0 | 0 | 1 |
 - claim 1: unchanged — v26.13.1 https://endoflife.date/nodejs
@@ -226,7 +227,7 @@ Before — `traces/2026-11-17-140139-what-did-i-ask-on-17-november-is-your-an.md
 
 After — fresh claim in session `f010check2` recorded as
 `Node.js / latest stable version = v26.13.1`, then re-checked in
-`traces/2026-11-17-151457-is-your-answer-about-node-js-still-corre.md`:
+`traces/curated/2026-11-17-151457-is-your-answer-about-node-js-still-corre.md`:
 ```
 | 1 | 1 | 0 | true | 0 | 0 | 1 |
 - claim 2: not_found — v26.13.1 https://nodejs.org/en/about/previous-releases
@@ -246,8 +247,8 @@ now runs a bounded two-step tool loop and executes the call (regression test:
 ## Live eval evidence for the grounding changes (2026-11-17)
 
 `npm run eval:live` after adding `pages.ts`, `critic.ts`, `source-date.ts` and
-`scope.ts`. Reports are at `eval/results/1794917952295.md`,
-`1794918492260.md`, `1794918790042.md` and `1794919036927.md`. Across those
+`scope.ts`. Reports are at `eval/curated/1794917952295.md`,
+`eval/curated/1794918492260.md`, `eval/curated/1794918790042.md` and `eval/curated/1794919036927.md`. Across those
 runs: offline 18/18 every time; live between 8/12 and 11/12. The variation is
 in which sources Tavily returns and how the judge weighs them, not in the
 pipeline — `grounding-001`, `citation-001` and `scope-001` passed in the final
