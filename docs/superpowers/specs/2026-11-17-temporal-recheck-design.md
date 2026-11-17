@@ -69,7 +69,10 @@ Two model calls maximum on the re-check path (extract, answer), independent of
   and for non-temporal questions ("compare the free tiers of Neon and
   Supabase").
 - Returns `{ date, phrase }` — the resolved `YYYY-MM-DD` local date and the
-  phrase that matched, both recorded in the trace.
+  phrase that matched, both recorded in the trace. When a message names several
+  dates ("what did I ask on 3 November? is it still correct today?"), use the
+  **earliest** date ref: the re-check compares against a past observation, and
+  "today" is the comparison point, not the observation being tested.
 
 ### `recheck.ts` (new)
 
@@ -80,7 +83,8 @@ Two model calls maximum on the re-check path (extract, answer), independent of
   Returns one result per claim: `{ value, url, quote, status }` where status is
   `changed | unchanged | not_found`. A URL not present in the retrieved sources
   is stripped (same guard as `claims.ts`). `not_found` when the sources do not
-  state a current value.
+  state a current value. If extraction returns no row for a claim, that claim
+  is treated as `not_found` — never silently dropped from the diff.
 - `buildDiff(oldClaims, fresh): { text, results }` — renders the developer
   context block with old value, new value, status, observed dates and URLs;
   returns the structured results for write-back and tracing.
