@@ -10,11 +10,16 @@ import { recheck } from "./recheck.js";
 import { describeNow } from "./dates.js";
 import { buildNotebook } from "./notebook.js";
 import { createLlm, type StopReason, type ToolCall } from "./llm.js";
-import { createSearch, type SearchResult } from "./search.js";
+import { createSearch, type SearchResult, type EnrichedSource } from "./search.js";
+import { createFetch, selectUrls } from "./pages.js";
+import { extractSourceDate } from "./source-date.js";
+import { ground, needsGrounding } from "./critic.js";
+import { guardScope } from "./scope.js";
 import { promptVersion, Tracer } from "./trace.js";
 
 const config = loadConfig();
 const search = createSearch(config.tavilyApiKey);
+const fetchPages = createFetch(config.tavilyApiKey);
 const llm = createLlm(new OpenAI({ apiKey: config.openaiApiKey }), config.model);
 
 const SINGLE_QUESTION = process.argv[2];
@@ -273,12 +278,43 @@ async function turn(
       return conclude(ctx, tracer, answer, "budget", modelCalls, runStart, now);
     }
 
-    tracer.log("\nFINAL:\n" + result.text);
-    if (result.text.trim() !== "") {
-      await ledger(ctx, tracer, result.text, sources, now, userText);
+    let answer = result.text;
+
+    if (answer.trim() !== "" && sources.length > 0 && needsGrounding(answer)) {
+      const pages = await fetchPages(
+        selectUrls(sources, 2, config.maxPageFetches)
+      );
+      const enriched: EnrichedSource[] = sources.map((source) => {
+        const pageText = pages.find((p) => p.url === source.url)?.text ?? null;
+        const text = `${source.content}\n${pageText ?? ""}`;
+        return { ...source, pageText, publishedAt: extractSourceDate(text) };
+      });
+
+      const grounded = await ground(llm, answer, enriched, userText);
+      tracer.llmCall({
+        label: "critic",
+        step: null,
+        ms: 0,
+        usage: grounded.usage,
+      });
+      tracer.critic(grounded);
+      if (grounded.error) {
+        tracer.log(
+          `(grounding critic failed: ${grounded.error}; using original answer)`
+        );
+      }
+      answer = grounded.answer;
     }
 
-    return conclude(ctx, tracer, result.text, "answered", modelCalls, runStart, now);
+    const scoped = guardScope(userText, answer);
+    tracer.scope(scoped);
+
+    tracer.log("\nFINAL:\n" + scoped.answer);
+    if (scoped.answer.trim() !== "") {
+      await ledger(ctx, tracer, scoped.answer, sources, now, userText);
+    }
+
+    return conclude(ctx, tracer, scoped.answer, "answered", modelCalls, runStart, now);
   } catch (err) {
     tracer.error({ message: message(err) });
     throw err;
