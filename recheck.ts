@@ -6,8 +6,12 @@
 // structured-output call, build a diff for the model to write an answer from,
 // and write the results back to the ledger.
 import type OpenAI from "openai";
+import type Database from "better-sqlite3";
 import type { Claim } from "./db.js";
 import type { ClaimSource } from "./claims.js";
+import { recordClaims } from "./claims.js";
+import { saveVerification } from "./db.js";
+import { localDateInTz } from "./dates.js";
 
 export type FreshStatus = "changed" | "unchanged" | "not_found";
 
@@ -143,4 +147,58 @@ export function buildDiff(
   }
   lines.push("</recheck-diff>");
   return { text: lines.join("\n"), results: fresh };
+}
+
+export function writeBack(
+  db: Database.Database,
+  sessionId: string,
+  claims: Claim[],
+  fresh: FreshValue[],
+  now: Date,
+  timeZone: string
+): { inserted: number; superseded: number; verifications: number } {
+  const localDate = localDateInTz(now, timeZone);
+  const checkedAt = now.toISOString();
+  const byId = new Map(fresh.map((f) => [f.claimId, f]));
+  let inserted = 0;
+  let superseded = 0;
+  let verifications = 0;
+
+  for (const claim of claims) {
+    const freshValue = byId.get(claim.id);
+    const status: FreshStatus = freshValue?.status ?? "not_found";
+
+    if (status === "changed" && freshValue && freshValue.value) {
+      const result = recordClaims(
+        db,
+        sessionId,
+        [
+          {
+            subject: claim.subject,
+            attribute: claim.attribute,
+            value: freshValue.value,
+            url: freshValue.url,
+            quote: freshValue.quote,
+          },
+        ],
+        now,
+        timeZone
+      );
+      inserted += result.inserted;
+      superseded += result.superseded;
+    }
+
+    saveVerification(db, {
+      sessionId,
+      claimId: claim.id,
+      checkedAt,
+      localDate,
+      result: status,
+      newValue: status === "changed" ? freshValue?.value ?? null : null,
+      url: status === "changed" ? freshValue?.url ?? null : null,
+    });
+    verifications++;
+  }
+
+  return { inserted, superseded, verifications };
 }

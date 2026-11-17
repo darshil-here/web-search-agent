@@ -4,9 +4,21 @@
 // no network, no API key. Run with: npm test
 import test from "node:test";
 import assert from "node:assert/strict";
+import { rmSync } from "node:fs";
 import type OpenAI from "openai";
-import type { Claim } from "./db.js";
-import { buildQueries, extractFreshValues, buildDiff } from "./recheck.js";
+import {
+  openClaim,
+  openDb,
+  verificationsForClaim,
+  type Claim,
+} from "./db.js";
+import { recordClaims } from "./claims.js";
+import {
+  buildQueries,
+  extractFreshValues,
+  buildDiff,
+  writeBack,
+} from "./recheck.js";
 
 function c(
   id: number,
@@ -108,4 +120,78 @@ test("buildDiff renders old -> new with status and dates", () => {
   assert.match(text, /changed/);
   assert.match(text, /2026-11-03/);
   assert.equal(results.length, 1);
+});
+
+// --- write-back -------------------------------------------------------------
+
+const PATH = "data/recheck-test.db";
+const IST = "Asia/Kolkata";
+const NOW = new Date("2026-11-16T19:00:00Z"); // 00:30 on 17 Nov in IST
+const LATER = new Date("2026-11-18T06:00:00Z");
+
+function freshDb() {
+  for (const s of ["", "-wal", "-shm"]) rmSync(PATH + s, { force: true });
+  return openDb(PATH);
+}
+
+function extracted(subject: string, attribute: string, value: string) {
+  return {
+    subject,
+    attribute,
+    value,
+    url: "https://neon.com/pricing",
+    quote: "quoted",
+  };
+}
+
+test("write-back supersedes changed values and logs every check", () => {
+  const db = freshDb();
+  const old = recordClaims(
+    db, "s", [extracted("Neon free tier", "storage", "10 GB")], NOW, IST
+  ).claims[0];
+
+  const result = writeBack(
+    db, "s", [old],
+    [
+      {
+        claimId: old.id,
+        value: "512 MB",
+        url: "https://neon.com/pricing",
+        quote: "512 MB",
+        status: "changed" as const,
+      },
+    ],
+    LATER,
+    IST
+  );
+
+  assert.equal(result.inserted, 1);
+  assert.equal(result.superseded, 1);
+  assert.equal(result.verifications, 1);
+  assert.equal(openClaim(db, "s", "Neon free tier", "storage")?.value, "512 MB");
+  assert.equal(verificationsForClaim(db, "s", old.id)[0].result, "changed");
+  db.close();
+});
+
+test("unchanged writes only a verification; not_found leaves the claim open", () => {
+  const db = freshDb();
+  const a = recordClaims(db, "s", [extracted("A", "price", "$10")], NOW, IST).claims[0];
+  const b = recordClaims(db, "s", [extracted("B", "price", "$20")], NOW, IST).claims[0];
+
+  const result = writeBack(
+    db, "s", [a, b],
+    [
+      { claimId: a.id, value: "$10", url: null, quote: null, status: "unchanged" as const },
+      { claimId: b.id, value: "", url: null, quote: null, status: "not_found" as const },
+    ],
+    LATER,
+    IST
+  );
+
+  assert.equal(result.inserted, 0);
+  assert.equal(result.superseded, 0);
+  assert.equal(result.verifications, 2);
+  assert.equal(openClaim(db, "s", "A", "price")?.value, "$10");
+  assert.equal(openClaim(db, "s", "B", "price")?.value, "$20");
+  db.close();
 });
