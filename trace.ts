@@ -37,7 +37,7 @@ type Recall = {
   truncated: boolean;
 };
 
-type LlmCall = {
+export type LlmCall = {
   step: number;
   ms: number;
   usage: TokenUsage;
@@ -208,6 +208,16 @@ export class Tracer {
 
   recheck(report: RecheckReport): void {
     this.recheckInfo = report;
+    // Feed the re-check's model calls into the same summary table as the
+    // ordinary loop, so a re-check run never reports zero steps or tokens.
+    this.llmCalls.push(...report.llmCalls);
+    for (const call of report.llmCalls) {
+      this.events.push({
+        type: "llm_call",
+        ts: new Date().toISOString(),
+        ...call,
+      });
+    }
     this.events.push({
       type: "recheck",
       ts: new Date().toISOString(),

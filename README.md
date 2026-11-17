@@ -28,6 +28,7 @@ Optional, with defaults:
 - `USER_TZ` (default `UTC`) — the timezone "today" and "yesterday" resolve in.
 - `DB_PATH` (default `data/agent.db`) — SQLite file.
 - `MAX_STEPS` (default `5`) — model turns before the loop gives up and says so.
+- `MAX_RECHECK_SEARCHES` (default `8`) — subjects a single temporal re-check may search.
 
 ## Memory
 
@@ -58,6 +59,19 @@ true.
 Recording runs after the answer is saved. It is best-effort: extraction errors
 are written to the trace, never thrown, so a ledger problem cannot fail a good
 answer. Questions that needed no search skip the extra call entirely.
+
+## Re-checks ("has it changed since then?")
+
+Questions that name a date and ask whether an earlier answer is still correct
+take a separate path. `detect.ts` decides from the text alone — no classifier
+call. The pipeline pulls that date's claims (or current beliefs if the date is
+empty), searches each subject in parallel, extracts fresh values with one
+structured-output call, and hands a dated diff to the model to write the answer.
+
+Changed values supersede in the ledger; every check — including "unchanged"
+and "not found" — is written to a `verifications` table, so a fact that was
+re-verified today is not mistaken for one never checked. Set
+`MAX_RECHECK_SEARCHES` (default 8) to bound the fan-out.
 
 ## Commands
 

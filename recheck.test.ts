@@ -295,6 +295,14 @@ test("tracer records a recheck event and renders its section", () => {
         status: "unchanged",
       },
     ],
+    llmCalls: [
+      {
+        step: 0,
+        ms: 10,
+        usage: { prompt: 100, completion: 20, total: 120 },
+        toolCallCount: 0,
+      },
+    ],
   });
   const path = t.flush();
   assert.ok(path.endsWith(".md"));

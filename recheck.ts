@@ -15,6 +15,13 @@ import { localDateInTz } from "./dates.js";
 import type { RecheckIntent } from "./detect.js";
 import type { NotebookContext } from "./notebook.js";
 
+export type RecheckLlmCall = {
+  step: number;
+  ms: number;
+  usage: { prompt: number; completion: number; total: number };
+  toolCallCount: number;
+};
+
 export type FreshStatus = "changed" | "unchanged" | "not_found";
 
 export type FreshValue = {
@@ -73,7 +80,12 @@ export async function extractFreshValues(
   openai: OpenAI,
   model: string,
   claims: Claim[],
-  sources: ClaimSource[]
+  sources: ClaimSource[],
+  onUsage?: (usage: {
+    prompt: number;
+    completion: number;
+    total: number;
+  }) => void
 ): Promise<FreshValue[]> {
   const sourceBlock =
     sources.length === 0
@@ -101,6 +113,14 @@ export async function extractFreshValues(
       },
     },
   });
+
+  if (response.usage && onUsage) {
+    onUsage({
+      prompt: response.usage.input_tokens,
+      completion: response.usage.output_tokens,
+      total: response.usage.total_tokens,
+    });
+  }
 
   const parsed = JSON.parse(response.output_text) as { results: FreshValue[] };
   const allowed = new Set(sources.map((s) => s.url));
@@ -214,6 +234,7 @@ export type RecheckReport = {
   writeBack: { inserted: number; superseded: number; verifications: number };
   usedSearch: boolean;
   fresh: FreshValue[];
+  llmCalls: RecheckLlmCall[];
 };
 
 export async function recheck(args: {
@@ -225,6 +246,9 @@ export async function recheck(args: {
   model: string;
   instructions: string;
   search: (q: string) => Promise<ClaimSource[]>;
+  /** Turn recall from the ordinary path, for compound questions that also ask
+   * what was said on the named date. */
+  notebookText?: string;
 }): Promise<RecheckReport> {
   const { ctx, intent, now, openai, model, instructions, search } = args;
   const dated = claimsForDate(ctx.db, ctx.sessionId, intent.date);
@@ -241,6 +265,7 @@ export async function recheck(args: {
       writeBack: { inserted: 0, superseded: 0, verifications: 0 },
       usedSearch: false,
       fresh: [],
+      llmCalls: [],
     };
   }
 
@@ -273,9 +298,21 @@ export async function recheck(args: {
     }
   }
 
+  const llmCalls: RecheckLlmCall[] = [];
   let fresh: FreshValue[];
+  const extractStart = performance.now();
   try {
-    fresh = await extractFreshValues(openai, model, claims, sources);
+    fresh = await extractFreshValues(
+      openai, model, claims, sources,
+      (usage) => {
+        llmCalls.push({
+          step: llmCalls.length,
+          ms: performance.now() - extractStart,
+          usage,
+          toolCallCount: 0,
+        });
+      }
+    );
   } catch {
     fresh = claims.map((c) => ({
       claimId: c.id,
@@ -298,16 +335,23 @@ export async function recheck(args: {
       writeBack: { inserted: 0, superseded: 0, verifications: 0 },
       usedSearch: false,
       fresh,
+      llmCalls,
     };
   }
 
+  const input: OpenAI.Responses.ResponseInputItem[] = [
+    ...(args.notebookText
+      ? [{ role: "developer" as const, content: args.notebookText }]
+      : []),
+    { role: "developer", content: diff },
+    { role: "user", content: args.userText },
+  ];
+
+  const answerStart = performance.now();
   const response = await openai.responses.create({
     model,
     instructions,
-    input: [
-      { role: "developer", content: diff },
-      { role: "user", content: args.userText },
-    ],
+    input,
     tools: [
       {
         type: "function",
@@ -322,6 +366,17 @@ export async function recheck(args: {
         strict: false,
       },
     ],
+  });
+
+  llmCalls.push({
+    step: llmCalls.length,
+    ms: performance.now() - answerStart,
+    usage: {
+      prompt: response.usage?.input_tokens ?? 0,
+      completion: response.usage?.output_tokens ?? 0,
+      total: response.usage?.total_tokens ?? 0,
+    },
+    toolCallCount: response.output.filter((o) => o.type === "function_call").length,
   });
 
   // Best-effort, same principle as claims.ts: a ledger failure is traced in
@@ -344,5 +399,6 @@ export async function recheck(args: {
     writeBack: writeBackResult,
     usedSearch: response.output.some((o) => o.type === "function_call"),
     fresh,
+    llmCalls,
   };
 }

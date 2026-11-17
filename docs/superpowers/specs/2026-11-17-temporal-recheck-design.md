@@ -1,7 +1,7 @@
 # Temporal re-check pipeline (step 3) — design
 
 **Date:** 2026-11-17
-**Status:** design approved in dialogue; awaiting written-spec review
+**Status:** implemented 2026-11-17
 
 ## Goal
 

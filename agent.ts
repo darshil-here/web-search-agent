@@ -215,43 +215,45 @@ async function turn(
   const sources: ClaimSource[] = [];
   let lastStep = 0;
 
-  // Temporal questions take a dedicated, deterministic path. Nothing above
-  // this point changes, and the ordinary loop below is untouched.
-  const intent = detectRecheck(userText, now, ctx.timeZone);
-  if (intent) {
-    const report = await recheck({
-      ctx,
-      intent,
-      userText,
-      now,
-      openai,
-      model,
-      instructions,
-      search: async (q) => {
-        const results = await webSearch(q);
-        searches.push(q);
-        return results;
-      },
-    });
-    tracer.recheck(report);
-    tracer.final({
-      step: 0,
-      content: report.answer,
-      totalMs: performance.now() - runStart,
-      totalTokens,
-      stopReason: "answered",
-    });
-    saveTurn(ctx.db, {
-      sessionId: ctx.sessionId,
-      role: "assistant",
-      content: report.answer,
-      createdAt: new Date().toISOString(),
-      localDate: localDateInTz(new Date(), ctx.timeZone),
-    });
-    return { answer: report.answer, stopReason: "answered" };
-  }
-
   try {
+    // Temporal questions take a dedicated, deterministic path. This stays
+    // inside the try so the finally below always flushes the trace.
+    const intent = detectRecheck(userText, now, ctx.timeZone);
+    if (intent) {
+      const report = await recheck({
+        ctx,
+        intent,
+        userText,
+        now,
+        openai,
+        model,
+        instructions,
+        notebookText: notebook.text,
+        search: async (q) => {
+          const results = await webSearch(q);
+          searches.push(q);
+          return results;
+        },
+      });
+      console.log(`\nRECHECK (${report.intent.date}):\n${report.answer}`);
+      tracer.recheck(report);
+      tracer.final({
+        step: 0,
+        content: report.answer,
+        totalMs: performance.now() - runStart,
+        totalTokens,
+        stopReason: "answered",
+      });
+      saveTurn(ctx.db, {
+        sessionId: ctx.sessionId,
+        role: "assistant",
+        content: report.answer,
+        createdAt: new Date().toISOString(),
+        localDate: localDateInTz(new Date(), ctx.timeZone),
+      });
+      return { answer: report.answer, stopReason: "answered" };
+    }
+
     for (let step = 0; step < MAX_STEPS; step++) {
       console.log(`\n--- step ${step}, ${input.length} items ---`);
 
