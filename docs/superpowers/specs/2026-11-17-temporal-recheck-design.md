@@ -41,8 +41,13 @@ detectRecheck(userText, now, tz)  →  null | { date, phrase }
            changed/unchanged/not_found, dated sources
         5. one model call with the diff block as developer context,
            web_search still available, writes the user-facing answer
-   both branches → save answer → ledger() write-back → trace
+   both branches → save answer → trace
 ```
+
+The re-check branch performs its own write-back (section "Write-back rules").
+The ordinary `ledger()` call from step 2 is skipped on the re-check path: its
+facts are already recorded by `writeBack`, so a second extraction would be a
+duplicate LLM call.
 
 The model's `web_search` tool definition is untouched. On the re-check path the
 pipeline calls the same `webSearch` function directly — code-level retrieval,
