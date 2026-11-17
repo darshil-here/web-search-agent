@@ -358,7 +358,9 @@ export const CASES: EvalCase[] = [
     name: "F-003 unsupported URLs are stripped",
     category: "information-extraction",
     source: "F-003",
-    question: "What are the free tier limits?",
+    // Must name a product: an ambiguous subject makes the agent ask for
+    // clarification, which has no factual claims to cite and tests nothing.
+    question: "What is the free tier storage limit of Neon?",
     structuredResponse: {
       claims: [
         {
@@ -378,7 +380,12 @@ export const CASES: EvalCase[] = [
       const claims = o.claims as Array<{ url: string | null }>;
       return claims.every((c) => c.url === null) ? null : "a URL survived without a retrieved source";
     },
-    rubric: { must: ["a URL beside every factual claim"] },
+    rubric: {
+      must: ["a URL beside every factual claim about the product or its limits"],
+      mustNot: ["a product or limit asserted without a URL"],
+      // A note about whether sources show a date is retrieval metadata required
+      // by F-006, not a product claim, so it needs no citation of its own.
+    },
   },
   {
     id: "calibration-001",

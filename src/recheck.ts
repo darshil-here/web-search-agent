@@ -429,13 +429,16 @@ export async function recheck(args: {
     errors.writeBack = message(err);
   }
 
+  // A model can say "answered" with empty text. Treat that as the failure it
+  // is rather than handing the user a blank reply (the F-009 lesson).
+  const empty = turn.text.trim() === "";
   return newReport(intent, {
     answer:
-      turn.stopReason === "budget"
+      turn.stopReason === "budget" || empty
         ? `I stopped while writing the re-check for ${intent.date} without an answer. ` +
           `Try asking again, or ask about one claim at a time.`
         : turn.text,
-    stopReason: turn.stopReason,
+    stopReason: turn.stopReason === "budget" || empty ? "budget" : turn.stopReason,
     queries: cappedQueries,
     claimsChecked: claims.length,
     failedSearches,

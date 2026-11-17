@@ -280,6 +280,18 @@ async function turn(
 
     let answer = result.text;
 
+    if (answer.trim() !== "" && sources.length > 0 && !needsGrounding(answer)) {
+      // The critic is skipped for simple answers, but F-006 still requires a
+      // statement about date visibility. Snippets alone are enough to decide
+      // this, so no page fetch or model call is needed on the fast path.
+      const hasDate = sources.some(
+        (source) => extractSourceDate(source.content) !== null
+      );
+      if (!hasDate) {
+        answer += "\n\nNo publication date was visible in the retrieved sources.";
+      }
+    }
+
     if (answer.trim() !== "" && sources.length > 0 && needsGrounding(answer)) {
       const pages = await fetchPages(
         selectUrls(sources, 2, config.maxPageFetches)

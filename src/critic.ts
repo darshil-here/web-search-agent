@@ -104,11 +104,16 @@ export async function ground(
       revised += "\n\nClaims not stated in sources were marked as such.";
     }
 
-    const hasDate = sources.some((s) => s.publishedAt !== null);
-    const note = hasDate
-      ? null
+    // Always state date visibility. F-006's rubric asks whether the cited
+    // source has a visible date, so silence is never an acceptable answer —
+    // even when some other source in the set did have one.
+    const dated = sources
+      .filter((s) => s.publishedAt !== null)
+      .map((s) => `${s.url} (${s.publishedAt})`);
+    const note = dated.length
+      ? `Publication dates visible in sources: ${dated.join(", ")}.`
       : "No publication date was visible in the retrieved sources.";
-    if (note) revised += `\n\n${note}`;
+    revised += `\n\n${note}`;
 
     return {
       answer: revised.trim() || answer,

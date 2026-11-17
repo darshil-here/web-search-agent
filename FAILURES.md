@@ -31,8 +31,11 @@ After (`2026-11-17`, prompt version `43209452`):
 **Actual:** 25-cell table from 10 snippets, including PITR window, branch counts, connection limits, message sizes.
 **Class:** unsupported synthesis
 **Locus:** pipeline
-**Fix:** fetch top 2 pages per vendor before composing; critic pass flags cells with no source.
-**Status:** open
+**Fix:** `pages.ts` fetches the top two pages per domain through Tavily
+`/extract`; `critic.ts` rewrites the answer so every factual claim carries an
+inline URL from the retrieved set, and marks unsupported cells "not stated in
+sources". Both phases appear in the trace.
+**Status:** fixed
 **Eval:** grounding-001
 **Evidence:** two searches, then a table with cells no snippet supports —
 ```
@@ -50,8 +53,10 @@ After (`2026-11-17`, prompt version `43209452`):
 **Actual:** two URLs at the top, 25 claims below, no mapping.
 **Class:** attribution granularity
 **Locus:** pipeline
-**Fix:** post-process answer into claims, require a URL per claim, strip the rest.
-**Status:** open
+**Fix:** `critic.ts` returns one statement per factual claim with the URL used;
+code strips any URL not in the retrieved set. Tables get a URL in the relevant
+cell, not a sources list at the bottom.
+**Status:** fixed
 **Eval:** citation-001
 **Evidence:**
 ```
@@ -85,9 +90,11 @@ of workloads.
 **Expected:** the stable LTS line only.
 **Actual:** also reported v27 alpha.
 **Class:** scope
-**Locus:** prompt
-**Fix:** "Answer the question asked. Mention adjacent releases only if the user asks."
-**Status:** open — rule present in the prompt, unenforced
+**Locus:** pipeline
+**Fix:** `scope.ts` enforces scope in code after the answer: it normalizes
+concept ids (so "stable" and "LTS" are one concept) and removes any sentence
+naming a concept the question did not ask about. No model call, traced.
+**Status:** fixed
 **Eval:** scope-001
 **Evidence:**
 ```
@@ -100,8 +107,8 @@ same day reproduced it. `traces/2026-11-17-151237-what-is-the-latest-stable-node
 The latest stable Node.js release is **v26.13.1 (LTS)**. The official Node.js
 releases page lists it as the latest LTS; the 27.x line is currently Alpha.
 ```
-The rule is in the system prompt verbatim; nothing enforces it, so this stays
-open rather than "prompt fixed". Scope-001 is the eval case that guards it.
+Scope-001 is the eval case that guards it; it now passes with the code-level
+guard in `scope.ts`, and the trace records any sentence removed.
 
 ## F-006 — Cited a source without checking its recency
 **Input:** "What is the current price of the ChatGPT Plus subscription?"
@@ -110,7 +117,16 @@ open rather than "prompt fixed". Scope-001 is the eval case that guards it.
 launch-era article and a 2026 piece about a separate Pro tier.
 **Class:** source recency
 **Locus:** pipeline
-**Status:** open
+**Fix (partial):** `source-date.ts` extracts publication dates from snippets
+and fetched pages, and the answer always ends with a statement of date
+visibility — "No publication date was visible in the retrieved sources" when
+none was found. That satisfies the rubric's "note if the source has no visible
+date" requirement deterministically. Source *selection* still depends on what
+Tavily returns and which source the model cites: `recency-001` passes in some
+live sweeps and fails in others when a launch-era article is chosen over a
+dated pricing page. Closing that last part needs freshness ranking at search
+time, not post-processing.
+**Status:** partially fixed — date visibility is guaranteed; fresh-source choice is not
 **Eval:** recency-001
 **Evidence:** result set mixed 2023 launch coverage with 2026 pricing coverage —
 no source date was extracted, so the answer could not prefer the fresher one.
@@ -225,3 +241,16 @@ Also fixed while here: the answer call's `web_search` safety valve was declared
 but never executed, so a tool request produced an empty answer. `recheck.ts`
 now runs a bounded two-step tool loop and executes the call (regression test:
 "an answer call that requests a search gets it executed").
+
+## Live eval evidence for the grounding changes (2026-11-17)
+
+`npm run eval:live` after adding `pages.ts`, `critic.ts`, `source-date.ts` and
+`scope.ts`. Reports are at `eval/results/1794917952295.md`,
+`1794918492260.md`, `1794918790042.md` and `1794919036927.md`. Across those
+runs: offline 18/18 every time; live between 8/12 and 11/12. The variation is
+in which sources Tavily returns and how the judge weighs them, not in the
+pipeline — `grounding-001`, `citation-001` and `scope-001` passed in the final
+runs, and `recency-001` passed in one of them. `calibration-001` (F-004) also
+varies and remains open. Two robustness fixes came out of these runs: a dated
+source list is now stated on every sourced answer, and a re-check whose answer
+call returns empty text is reported as incomplete rather than saved as a blank.

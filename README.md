@@ -39,6 +39,7 @@ Optional, with defaults:
 - `TRACES_DIR` (default `traces`) — where the per-run `.md`/`.jsonl` evidence goes.
 - `MAX_STEPS` (default `5`) — model turns before the loop gives up and says so.
 - `MAX_RECHECK_SEARCHES` (default `8`) — subjects a single temporal re-check may search.
+- `MAX_PAGE_FETCHES` (default `6`) — pages fetched to ground one answer.
 
 ## Memory
 
@@ -83,6 +84,18 @@ and "not found" — is written to a `verifications` table, so a fact that was
 re-verified today is not mistaken for one never checked. Set
 `MAX_RECHECK_SEARCHES` (default 8) to bound the fan-out.
 
+## Answer grounding
+
+On the ordinary search path, answers that contain a table or at least three
+numbers get one extra step: Tavily `/extract` fetches the top pages (two per
+domain, `MAX_PAGE_FETCHES` total), publication dates are read from the text, and
+a critic rewrites the answer so every factual claim carries an inline URL from
+the retrieved set. Unsupported claims are marked "not stated in sources".
+Simpler answers skip the fetch and critic, but every sourced answer still gets
+a statement of whether the sources showed a publication date. A deterministic
+scope guard then removes sentences volunteering concepts the user did not ask
+about. Both phases appear in the trace.
+
 ## Commands
 
 ```sh
@@ -113,6 +126,7 @@ the open grounding, citation, scope and recency failures in `FAILURES.md`.
 
 Each turn writes `traces/<date>-<time>-<slug>.md` and `.jsonl`: steps, tokens,
 latency, search queries, sources, the notebook that was injected, the claims
-recorded (including extraction errors), the re-check diff, and a verdict
+recorded (including extraction errors), the re-check diff, the grounding
+critic and scope phases, and a verdict
 (`ok`, `incomplete`, `error`). Set `TRACES_DIR` to move them. Traces are
 gitignored; `FAILURES.md` quotes the runs it cites.

@@ -205,6 +205,43 @@ test("unchanged writes only a verification; not_found leaves the claim open", ()
 
 // --- orchestration ----------------------------------------------------------
 
+test("an empty answer text is reported as an incomplete re-check", async () => {
+  const db = freshDb();
+  const claim = recordClaims(
+    db, "s", [extracted("A", "price", "$10")], NOW, IST
+  ).claims[0];
+
+  const report = await recheck({
+    ctx: { db, sessionId: "s", timeZone: IST },
+    intent: { date: "2026-11-17", phrase: "still correct" },
+    userText: "Is A still correct?",
+    now: NOW,
+    llm: stubLlm(
+      {
+        results: [
+          {
+            claimId: claim.id,
+            value: "$10",
+            url: "https://neon.com/pricing",
+            quote: "$10",
+            status: "unchanged",
+          },
+        ],
+      },
+      "" // claims "answered" but produces no text
+    ),
+    instructions: "You are a research assistant.",
+    maxSearches: 8,
+    search: async () => [
+      { title: "A", url: "https://neon.com/pricing", content: "$10" },
+    ],
+  });
+
+  assert.equal(report.stopReason, "budget");
+  assert.match(report.answer, /without an answer/);
+  db.close();
+});
+
 test("recheck falls back to open claims when the named date is empty", async () => {
   const db = freshDb();
   const claim = recordClaims(
