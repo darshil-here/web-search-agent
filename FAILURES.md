@@ -168,3 +168,35 @@ trace: traces/2026-11-17-001730-what-is-the-latest-stable-node-js-versio.md
 exit=1
 verdict: incomplete
 ```
+
+## F-010 — Re-check verified a narrower attribute than the one asked about
+**Date:** 2026-11-17
+**Input:** "What did I ask on 17 November? Is your answer still correct today?"
+(against the recorded claim `Node.js / latest LTS release = v26.13.1`)
+**Expected:** the re-check should notice that the original question was about
+the latest *stable* release while the stored claim says *LTS*, and either
+re-verify that exact attribute or mark the comparison `not_found` with the
+mismatch stated. "LTS is unchanged" does not establish "stable is unchanged".
+**Actual:** extraction collapsed the original "latest stable" answer into the
+attribute `latest LTS release`. The fresh source described only LTS, so the
+re-check recorded `unchanged` against that narrower attribute and the ledger
+now says the original claim was re-verified today. The model noticed the gap
+in prose, but the ledger did not.
+**Class:** claim granularity / attribute drift
+**Locus:** `claims.ts` (extraction) and `recheck.ts` (fresh-value matching)
+**Fix:** constrain attributes to a controlled vocabulary (or require an exact
+subject+attribute+value match before reporting `unchanged`). When a source
+states a different but related concept, return `not_found` and surface the
+mismatch rather than silently verifying the nearest available attribute.
+**Status:** open
+**Eval:** temporal-002
+**Evidence:** `traces/2026-11-17-140139-what-did-i-ask-on-17-november-is-your-an.md` —
+re-check section and answer —
+```
+| 1 | 1 | 0 | false | 0 | 0 | 1 |
+- claim 1: unchanged — v26.13.1 https://endoflife.date/nodejs
+
+The recorded Node.js version, **v26.13.1**, is still listed as the latest
+**LTS** release today: https://endoflife.date/nodejs. ... The recheck I have
+confirms its LTS status, not separately whether it is the latest stable release.
+```
