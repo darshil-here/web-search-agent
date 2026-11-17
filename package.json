@@ -7,7 +7,7 @@
     "dev": "tsx --env-file=.env agent.ts",
     "trace": "npm start --",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test dates.test.ts notebook.test.ts",
+    "test": "tsx --test dates.test.ts notebook.test.ts claims.test.ts",
     "db:check": "tsx scripts/db-check.ts",
     "db:reset": "rm -f data/agent.db data/agent.db-wal data/agent.db-shm"
   },
