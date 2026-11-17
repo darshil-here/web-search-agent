@@ -1,3 +1,17 @@
+test("an unasked release sibling is detected", () => {
+  assert.equal(
+    unaskedSibling("latest stable Node.js", "v27 alpha is experimental"),
+    "alpha"
+  );
+});
+
+test("an asked-for sibling is not flagged", () => {
+  assert.equal(
+    unaskedSibling("stable vs alpha releases", "v27 alpha is experimental"),
+    null
+  );
+});
+
 // Sibling concepts decide whether two attribute spellings describe the same
 // thing, which is failure F-010. These tests pin the two directions: reword
 // inside a family, never across families.
@@ -7,6 +21,7 @@ import {
   anchorAttribute,
   attributeTokens,
   sameAttribute,
+  unaskedSibling,
   SIBLING_CONCEPTS,
 } from "../src/concepts.js";
 

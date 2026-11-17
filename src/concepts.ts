@@ -63,6 +63,32 @@ function contradicts(a: string, b: string): boolean {
   });
 }
 
+// Scope works on normalized concept ids. "stable" and "LTS" map to the same id
+// because they name the same requested channel; "alpha" is a different id, so
+// volunteering it when the user asked for stable is a scope breach.
+const SCOPE_CONCEPTS: Array<{ id: string; patterns: RegExp[] }> = [
+  { id: "stable", patterns: [/\bstable\b/i, /\blts\b/i, /long[- ]term support/i] },
+  { id: "current", patterns: [/\bcurrent\b/i] },
+  { id: "alpha", patterns: [/\balpha\b/i] },
+  { id: "beta", patterns: [/\bbeta\b/i] },
+  { id: "preview", patterns: [/\bpreview\b/i] },
+  { id: "free", patterns: [/\bfree\b/i] },
+  { id: "paid", patterns: [/\bpaid\b|\bpro\b|\bpremium\b/i] },
+];
+
+function scopeConcepts(text: string): string[] {
+  return SCOPE_CONCEPTS.filter((c) =>
+    c.patterns.some((pattern) => pattern.test(text))
+  ).map((c) => c.id);
+}
+
+/** A concept present in `text` but absent from `question`, if any. */
+export function unaskedSibling(question: string, text: string): string | null {
+  const asked = new Set(scopeConcepts(question));
+  if (asked.size === 0) return null;
+  return scopeConcepts(text).find((id) => !asked.has(id)) ?? null;
+}
+
 /**
  * Whether two spellings name the same attribute: one's words are all in the
  * other, and neither names a sibling concept the other contradicts.
