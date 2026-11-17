@@ -10,11 +10,17 @@ import { recheck } from "./recheck.js";
 import { describeNow } from "./dates.js";
 import { buildNotebook } from "./notebook.js";
 import { createLlm, type StopReason, type ToolCall } from "./llm.js";
-import { createSearch, type SearchResult, type EnrichedSource } from "./search.js";
+import {
+  createSearch,
+  rankByFreshness,
+  type SearchResult,
+  type EnrichedSource,
+} from "./search.js";
 import { createFetch, selectUrls } from "./pages.js";
 import { extractSourceDate } from "./source-date.js";
 import { ground, needsGrounding } from "./critic.js";
 import { guardScope } from "./scope.js";
+import { guardCalibration } from "./calibration.js";
 import { promptVersion, Tracer } from "./trace.js";
 
 const config = loadConfig();
@@ -278,28 +284,42 @@ async function turn(
       return conclude(ctx, tracer, answer, "budget", modelCalls, runStart, now);
     }
 
+    // Freshness is a retrieval decision: the model can only prefer a current
+    // source if it sees it first, so rank before any of the answer post-steps.
+    const rankedSources = rankByFreshness(sources);
     let answer = result.text;
 
-    if (answer.trim() !== "" && sources.length > 0 && !needsGrounding(answer)) {
+    if (answer.trim() !== "" && rankedSources.length > 0 && !needsGrounding(answer)) {
       // The critic is skipped for simple answers, but F-006 still requires a
       // statement about date visibility. Snippets alone are enough to decide
       // this, so no page fetch or model call is needed on the fast path.
-      const hasDate = sources.some(
-        (source) => extractSourceDate(source.content) !== null
+      const hasDate = rankedSources.some(
+        (source) =>
+          extractSourceDate(source.content) !== null ||
+          (source.publishedAt !== null && source.publishedAt !== undefined)
       );
       if (!hasDate) {
         answer += "\n\nNo publication date was visible in the retrieved sources.";
       }
     }
 
-    if (answer.trim() !== "" && sources.length > 0 && needsGrounding(answer)) {
+    if (
+      answer.trim() !== "" &&
+      rankedSources.length > 0 &&
+      needsGrounding(answer)
+    ) {
       const pages = await fetchPages(
-        selectUrls(sources, 2, config.maxPageFetches)
+        selectUrls(rankedSources, 2, config.maxPageFetches)
       );
-      const enriched: EnrichedSource[] = sources.map((source) => {
+      const enriched: EnrichedSource[] = rankedSources.map((source) => {
         const pageText = pages.find((p) => p.url === source.url)?.text ?? null;
         const text = `${source.content}\n${pageText ?? ""}`;
-        return { ...source, pageText, publishedAt: extractSourceDate(text) };
+        return {
+          ...source,
+          pageText,
+          publishedAt:
+            extractSourceDate(text) ?? source.publishedAt ?? null,
+        };
       });
 
       const grounded = await ground(llm, answer, enriched, userText);
@@ -317,6 +337,10 @@ async function turn(
       }
       answer = grounded.answer;
     }
+
+    const calibrated = guardCalibration(userText, answer, rankedSources);
+    tracer.calibration(calibrated);
+    answer = calibrated.answer;
 
     const scoped = guardScope(userText, answer);
     tracer.scope(scoped);

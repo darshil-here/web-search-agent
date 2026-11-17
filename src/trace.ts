@@ -79,6 +79,8 @@ export type CriticTrace = {
 
 export type ScopeTrace = { removed: string[] };
 
+export type CalibrationTrace = { rewritten: string[] };
+
 type TraceError = { message: string };
 
 type TraceEvent = {
@@ -131,6 +133,7 @@ export class Tracer {
   private recheckInfo: RecheckTrace | undefined;
   private criticInfo: CriticTrace | undefined;
   private scopeInfo: ScopeTrace | undefined;
+  private calibrationInfo: CalibrationTrace | undefined;
   private flushedPath: string | undefined;
 
   constructor(
@@ -216,6 +219,15 @@ export class Tracer {
   scope(result: ScopeTrace): void {
     this.scopeInfo = result;
     this.events.push({ type: "scope", ts: new Date().toISOString(), ...result });
+  }
+
+  calibration(result: CalibrationTrace): void {
+    this.calibrationInfo = result;
+    this.events.push({
+      type: "calibration",
+      ts: new Date().toISOString(),
+      ...result,
+    });
   }
 
   recheck(report: RecheckTrace): void {
@@ -326,6 +338,7 @@ export class Tracer {
       `critic_statements: ${this.criticInfo?.statements ?? 0}`,
       `critic_dropped: ${this.criticInfo?.dropped ?? 0}`,
       `scope_removed: ${this.scopeInfo?.removed.length ?? 0}`,
+      `calibration_rewrites: ${this.calibrationInfo?.rewritten.length ?? 0}`,
       "tokens:",
       `  prompt: ${totals.prompt}`,
       `  completion: ${totals.completion}`,
@@ -431,6 +444,18 @@ export class Tracer {
       } else {
         for (const sentence of this.scopeInfo.removed) {
           lines.push(`- removed: ${tableCell(sentence)}`);
+        }
+        lines.push("");
+      }
+    }
+
+    if (this.calibrationInfo) {
+      lines.push("", "## Calibration", "");
+      if (this.calibrationInfo.rewritten.length === 0) {
+        lines.push("_No rewrites._", "");
+      } else {
+        for (const sentence of this.calibrationInfo.rewritten) {
+          lines.push(`- rewrote: ${tableCell(sentence)}`);
         }
         lines.push("");
       }

@@ -29,6 +29,27 @@ const EXTRACT_CALL = {
   usage: { prompt: 100, completion: 20, total: 120 },
 };
 
+test("calibration rewrites render in the trace", () => {
+  const dir = tempDir();
+  try {
+    const tracer = new Tracer("test", dir);
+    tracer.calibration({ rewritten: ["The plan is permanent."] });
+    const original = console.log;
+    console.log = () => {};
+    let path: string;
+    try {
+      path = tracer.flush();
+    } finally {
+      console.log = original;
+    }
+    const text = readFileSync(path, "utf8");
+    assert.match(text, /## Calibration/);
+    assert.match(text, /calibration_rewrites: 1/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("critic and scope phases render in the trace", () => {
   const dir = tempDir();
   try {
