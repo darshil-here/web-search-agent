@@ -64,6 +64,20 @@ type TraceError = {
   message: string;
 };
 
+export type ClaimEvent = {
+  extracted: number;
+  inserted: number;
+  superseded: number;
+  unchanged: number;
+  claims: Array<{
+    subject: string;
+    attribute: string;
+    value: string;
+    url: string | null;
+  }>;
+  error?: string;
+};
+
 type TraceEvent = {
   type: string;
   ts: string;
@@ -112,6 +126,7 @@ export class Tracer {
   private meta: RunStart | undefined;
   private finalInfo: Final | undefined;
   private recallInfo: Recall | undefined;
+  private claimInfo: ClaimEvent | undefined;
   private flushedPath: string | undefined;
 
   constructor(question: string) {
@@ -175,6 +190,15 @@ export class Tracer {
     this.finalInfo = info;
     this.events.push({
       type: "final",
+      ts: new Date().toISOString(),
+      ...info,
+    });
+  }
+
+  claims(info: ClaimEvent): void {
+    this.claimInfo = info;
+    this.events.push({
+      type: "claims",
       ts: new Date().toISOString(),
       ...info,
     });
@@ -275,6 +299,7 @@ export class Tracer {
       `prompt_version: ${JSON.stringify(meta.promptVersion)}`,
       `steps: ${this.llmCalls.length}`,
       `tool_calls: ${this.toolCalls.length}`,
+      `claims: ${this.claimInfo?.extracted ?? 0}`,
       "tokens:",
       `  prompt: ${totals.prompt}`,
       `  completion: ${totals.completion}`,
@@ -325,6 +350,35 @@ export class Tracer {
       if (recall.refs.length > 0) {
         lines.push(`Dates parsed: ${recall.refs.join(", ")}`, "");
         lines.push(`Dates queried: ${recall.dates.join(", ") || "none"}`, "");
+      }
+    }
+
+    if (this.claimInfo) {
+      const c = this.claimInfo;
+      lines.push(
+        "",
+        "## Claim ledger",
+        "",
+        "| extracted | inserted | superseded | unchanged |",
+        "|----------:|---------:|-----------:|----------:|",
+        `| ${c.extracted} | ${c.inserted} | ${c.superseded} | ${c.unchanged} |`,
+        ""
+      );
+      if (c.error) lines.push(`**Extraction error:** ${c.error}`, "");
+      if (c.claims.length === 0) {
+        lines.push("_No claims recorded._", "");
+      } else {
+        lines.push(
+          "| subject | attribute | value | url |",
+          "|---------|-----------|-------|-----|"
+        );
+        for (const claim of c.claims) {
+          lines.push(
+            `| ${tableCell(claim.subject)} | ${tableCell(claim.attribute)} | ` +
+              `${tableCell(claim.value)} | ${tableCell(claim.url ?? "—")} |`
+          );
+        }
+        lines.push("");
       }
     }
 
