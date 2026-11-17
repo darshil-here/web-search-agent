@@ -90,6 +90,34 @@ function searchTool(description: string): OpenAI.Responses.FunctionTool {
   };
 }
 
+type CreateParams = OpenAI.Responses.ResponseCreateParamsNonStreaming;
+type CreateResponse = OpenAI.Responses.Response;
+
+function isReasoningError(err: unknown): boolean {
+  const status = (err as { status?: number })?.status;
+  const text = err instanceof Error ? err.message : String(err);
+  return status === 400 && /reasoning/i.test(text);
+}
+
+/**
+ * A non-reasoning model slug rejects `reasoning` with a 400. Retry once without
+ * it rather than keeping a list of slugs that support it — the API tells us.
+ */
+async function createWithFallback(
+  client: OpenAI,
+  params: CreateParams,
+  onFallback?: () => void
+): Promise<CreateResponse> {
+  try {
+    return await client.responses.create(params);
+  } catch (err) {
+    if (!isReasoningError(err)) throw err;
+    const { reasoning: _unused, ...withoutReasoning } = params;
+    onFallback?.();
+    return client.responses.create(withoutReasoning as CreateParams);
+  }
+}
+
 class ModelLlm implements Llm {
   constructor(
     private readonly client: OpenAI,
@@ -99,7 +127,7 @@ class ModelLlm implements Llm {
   async structured<T>(
     request: StructuredRequest
   ): Promise<{ data: T; usage: Usage }> {
-    const response = await this.client.responses.create({
+    const response = await createWithFallback(this.client, {
       model: this.model,
       instructions: request.instructions,
       input: request.input,
@@ -130,13 +158,26 @@ class ModelLlm implements Llm {
       emit({ type: "step", step, items: input.length });
 
       const started = performance.now();
-      const response = await this.client.responses.create({
-        model: this.model,
-        instructions: request.instructions,
-        input,
-        tools,
-        reasoning: { effort: "low" },
-      });
+      const response = await createWithFallback(
+        this.client,
+        {
+          model: this.model,
+          instructions: request.instructions,
+          input,
+          tools,
+          reasoning: { effort: "low" },
+        },
+        () =>
+          emit({
+            type: "llm",
+            call: {
+              label: "answer (no reasoning)",
+              step,
+              ms: 0,
+              usage: { prompt: 0, completion: 0, total: 0 },
+            },
+          })
+      );
       const calls = response.output.filter(
         (item): item is OpenAI.Responses.ResponseFunctionToolCall =>
           item.type === "function_call"

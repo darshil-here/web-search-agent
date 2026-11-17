@@ -46,6 +46,98 @@ function fakeClient(responses: unknown[]) {
   return { client, requests };
 }
 
+test("a reasoning 400 is retried once without the reasoning option", async () => {
+  const requests: Array<Record<string, unknown>> = [];
+  let next = 0;
+  const client = {
+    responses: {
+      create: async (request: Record<string, unknown>) => {
+        requests.push(request);
+        if (next++ === 0) {
+          const err = new Error("Unsupported parameter: reasoning") as Error & {
+            status?: number;
+          };
+          err.status = 400;
+          throw err;
+        }
+        return message("answer");
+      },
+    },
+  } as unknown as OpenAI;
+
+  const events: TurnEvent[] = [];
+  const result = await createLlm(client, "test-model").turn({
+    instructions: "sys",
+    input: [{ role: "user", content: "hello" }],
+    search: async () => [],
+    toolDescription: "search",
+    maxSteps: 1,
+    onEvent: (event) => events.push(event),
+  });
+
+  assert.equal(result.text, "answer");
+  assert.equal(requests.length, 2);
+  assert.ok("reasoning" in requests[0]);
+  assert.ok(!("reasoning" in requests[1]));
+  assert.ok(
+    events.some(
+      (e) => e.type === "llm" && e.call.label === "answer (no reasoning)"
+    )
+  );
+});
+
+test("a non-reasoning 400 is not retried", async () => {
+  let calls = 0;
+  const client = {
+    responses: {
+      create: async () => {
+        calls++;
+        const err = new Error("bad api key") as Error & { status?: number };
+        err.status = 400;
+        throw err;
+      },
+    },
+  } as unknown as OpenAI;
+
+  await assert.rejects(
+    createLlm(client, "test-model").structured({
+      name: "x",
+      schema: { type: "object", properties: {}, required: [] },
+      instructions: "sys",
+      input: "in",
+    }),
+    /bad api key/
+  );
+  assert.equal(calls, 1);
+});
+
+test("a failing reasoning retry propagates", async () => {
+  let calls = 0;
+  const client = {
+    responses: {
+      create: async () => {
+        calls++;
+        const err = new Error("reasoning unsupported") as Error & {
+          status?: number;
+        };
+        err.status = 400;
+        throw err;
+      },
+    },
+  } as unknown as OpenAI;
+
+  await assert.rejects(
+    createLlm(client, "test-model").structured({
+      name: "x",
+      schema: { type: "object", properties: {}, required: [] },
+      instructions: "sys",
+      input: "in",
+    }),
+    /reasoning unsupported/
+  );
+  assert.equal(calls, 2);
+});
+
 test("structured parses the JSON answer and reports usage", async () => {
   const { client, requests } = fakeClient([
     {
