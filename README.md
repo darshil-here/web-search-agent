@@ -39,11 +39,31 @@ retrieval, not a tool: the schema still holds exactly one tool.
 
 The notebook is capped at 4 KB. When it drops turns it says so.
 
+## Claim ledger (schema v2)
+
+Answers that used web search get one extra, non-fatal pipeline step: a
+structured-output call extracts checkable facts as
+`subject / attribute / value / url / quote` and stores them in a `claims` table.
+A fact is never overwritten. If a later answer asserts a different value for
+the same subject+attribute, the old row gets a `valid_until` date and a
+`superseded_by` pointer to the new row. That validity chain is what makes
+"has it changed since then?" answerable later.
+
+Each claim stores both `observed_at` (UTC instant) and `local_date` (in
+`USER_TZ`), for the same reason turns do: date recall must not break for the
+hours when UTC and the user's date disagree. `valid_from` defaults to the
+observed local date, since we only know when we *saw* a fact, not when it became
+true.
+
+Recording runs after the answer is saved. It is best-effort: extraction errors
+are written to the trace, never thrown, so a ledger problem cannot fail a good
+answer. Questions that needed no search skip the extra call entirely.
+
 ## Commands
 
 ```sh
 npm run dev        # chat
-npm test           # date parsing and notebook tests, no network
+npm test           # date, notebook and claim-ledger tests, no network
 npm run typecheck  # tsc --noEmit
 npm run db:check   # exercise the schema against data/db-check.db
 npm run db:reset   # delete data/agent.db
@@ -52,6 +72,6 @@ npm run db:reset   # delete data/agent.db
 ## Traces
 
 Each turn writes `traces/<date>-<time>-<slug>.md` and `.jsonl`: steps, tokens,
-latency, search queries, sources, the notebook that was injected, and a verdict
-(`ok`, `incomplete`, `error`). Traces are gitignored; `FAILURES.md` quotes the
-runs it cites.
+latency, search queries, sources, the notebook that was injected, the claims
+recorded (including extraction errors), and a verdict (`ok`, `incomplete`,
+`error`). Traces are gitignored; `FAILURES.md` quotes the runs it cites.
