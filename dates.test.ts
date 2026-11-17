@@ -123,3 +123,19 @@ test("timezones are validated before the first turn, not mid-answer", () => {
   assert.doesNotThrow(() => assertTimeZone("Europe/London"));
   assert.throws(() => assertTimeZone("Mars/Olympus"), /not a valid IANA timezone/);
 });
+
+test("a bare weekday means the most recent past occurrence", () => {
+  // NOV_17_IST is a Tuesday.
+  assert.deepEqual(parseDateRefs("On Monday we shortlisted 5 CRM tools", NOV_17_IST, IST), [
+    { label: "Monday", date: "2026-11-16" },
+  ]);
+  assert.deepEqual(parseDateRefs("what did I ask on Tuesday?", NOV_17_IST, IST), [
+    { label: "Tuesday", date: "2026-11-17" },
+  ]);
+});
+
+test("last Tuesday keeps its own label over the bare weekday match", () => {
+  assert.deepEqual(parseDateRefs("what did I ask last Tuesday?", NOV_17_IST, IST), [
+    { label: "last Tuesday", date: "2026-11-10" },
+  ]);
+});

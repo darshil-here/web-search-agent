@@ -207,6 +207,19 @@ export function parseDateRefs(
     return { label: m[0], date: addDays(today, -delta) };
   });
 
+  // A bare weekday ("On Monday...") is the most recent past occurrence.
+  // Placed after `last <weekday>` so the longer label wins the index sort.
+  scan(new RegExp(`\\b(${WEEKDAY_PATTERN})\\b`, "gi"), (m) => {
+    // "last Tuesday" is already handled above with a 7-day minimum. Its bare
+    // match resolves to a different date, so dedupe by date would not catch it.
+    const before = text.slice(Math.max(0, m.index - 5), m.index).toLowerCase();
+    if (/\blast\s+$/.test(before)) return null;
+    const target = WEEKDAY_INDEX[m[1].slice(0, 3).toLowerCase()];
+    if (target === undefined) return null;
+    const delta = (weekdayOf(today) - target + 7) % 7;
+    return { label: m[0], date: addDays(today, -delta) };
+  });
+
   const seen = new Set<string>();
   return found
     .sort((a, b) => a.index - b.index)
