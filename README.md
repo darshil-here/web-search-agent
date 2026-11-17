@@ -49,7 +49,13 @@ Before each model call the loop reads a small `<notebook>` block — the turns f
 a date you named, or the last few turns — and injects it as context. That is
 retrieval, not a tool: the schema still holds exactly one tool.
 
-The notebook is capped at 4 KB. When it drops turns it says so.
+The notebook is capped at 4 KB. When it drops turns it says so. It also
+injects the session's open claims (current beliefs) after the turn history,
+capped at 12, so follow-up questions can refer to facts as well as prose.
+
+Reasoning effort is optional: if the model rejects `reasoning` with a 400, the
+agent retries once without it, so swapping `MODEL` to a non-reasoning slug does
+not break the agent. The fallback is visible in the trace.
 
 ## Claim ledger (schema v3)
 
@@ -132,5 +138,6 @@ Each turn writes `traces/<date>-<time>-<slug>.md` and `.jsonl`: steps, tokens,
 latency, search queries, sources, the notebook that was injected, the claims
 recorded (including extraction errors), the re-check diff, the grounding
 critic and scope phases, and a verdict
-(`ok`, `incomplete`, `error`). Set `TRACES_DIR` to move them. Traces are
-gitignored; `FAILURES.md` quotes the runs it cites.
+(`ok`, `incomplete`, `error`). Set `TRACES_DIR` to move them. Runtime traces are
+gitignored; the ones `FAILURES.md` cites are committed under `traces/curated/`
+and `eval/curated/`, so every citation resolves.

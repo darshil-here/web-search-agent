@@ -3,7 +3,7 @@
 ## How it works
 
 1. **User speaks.** `agent.ts` runs a stdin REPL (single-question mode also works). A `SESSION_ID` scopes the conversation.
-2. **Notebook recall — before the model sees the question.** `dates.ts` parses date references in the user's timezone; `notebook.ts` queries `db.ts` for turns on those dates, or the last 8 turns if none were named, and renders a `<notebook>` block capped at 4 KB. A date with no turns produces a literal "No turns on YYYY-MM-DD", not silence. Nothing is written yet, so the model is never handed its own prompt as "memory."
+2. **Notebook recall — before the model sees the question.** `dates.ts` parses date references in the user's timezone; `notebook.ts` queries `db.ts` for turns on those dates, or the last 8 turns if none were named, and renders a `<notebook>` block capped at 4 KB. The session's open claims are appended after the turns (max 12), so the byte-budget trim drops old turns before current beliefs. A date with no turns produces a literal "No turns on YYYY-MM-DD", not silence. Nothing is written yet, so the model is never handed its own prompt as "memory."
 3. **Model + one tool.** `agent.ts` injects the notebook as a developer message plus the system prompt (with the current date rendered from `new Date()`), then hands the turn to `llm.ts`, which calls the OpenAI Responses API with one tool, `web_search` (Tavily, top 5 results trimmed to title/url/content). Tool calls run, results are appended as `function_call_output`, and the loop repeats up to `MAX_STEPS` (default 5).
 4. **Answer.** On a final response, the text is returned and saved. If the step budget is exhausted, the agent says so explicitly, reports the searches it ran, and exits non-zero — never a blank answer.
 5. **Turn saved.** `db.ts` stores both turns with `created_at` (UTC, for ordering) and `local_date` (in `USER_TZ`, for date matching), behind a versioned SQLite migration.
@@ -24,6 +24,7 @@
 - **Traces as a first-class layer.** Every run records its prompt hash, per-step cost/latency, queries, sources, injected memory, and a verdict. That is how the failure log and every fix claim are evidence-backed rather than vibes.
 - **A claim ledger, not bigger memory.** Turn text tells you what was said; it cannot answer "has it changed". Storing facts as validity intervals — never overwriting, only superseding — is the Zep-style model that makes staleness a query the code can answer. Extraction is one traced pipeline call, not a second tool, so the single-tool rule still holds. It is best-effort and skipped when no search happened, so it does not tax latency or cost on questions with no external facts.
 - **Re-check is deterministic where it matters.** Deciding *whether* to re-check and *which* claims to test is code, not a model guess. The model is only asked to write the answer from a diff it cannot silently omit: unchanged and not-found rows are rendered too, and every check gets a verification row. That is the same reasoning as memory-as-retrieval — trust code for discipline, the model for language.
+- **The model boundary trusts the API, not a slug list.** `llm.ts` retries once without `reasoning` when the API rejects it with a 400, so a new model slug cannot silently break every call. The retry is traced rather than hidden.
 - **Grounding is a pipeline concern.** The model writes prose; code decides which URLs exist and which sentences violate scope. F-005 was a prompt rule the model followed intermittently, so it is now a pure function. Likewise, the critic can propose citations but code strips any URL that was not actually retrieved. The critic runs only on table/number-heavy answers so simple questions stay fast; date visibility is stated on every sourced answer because source selection is not yet reliable.
 
 ## What I considered and rejected
@@ -36,9 +37,8 @@
 
 The brief's examples are temporal questions, and the ledger plus re-check path now answer them. Remaining work:
 
-- **Claim recall in the notebook.** Inject open claims (current beliefs) alongside turn text so follow-up questions can refer to facts, not just to prose. The re-check path reads claims, but ordinary conversation still only sees turn text.
 - **Wider detection.** The detector covers the phrasing in the brief and close variants. An LLM classifier could catch more, at the cost of a call on every turn — measure first.
-- **Robustness.** Guard `reasoning: { effort: "low" }` in `llm.ts` against non-reasoning model slugs and commit a curated `traces/` subset, since `FAILURES.md` currently cites gitignored paths.
 - **Judge stability.** The live evaluator is sensitive to which sources Tavily returns; the same code has scored between 7/12 and 10/12. Pinning a source snapshot or scoring per-rubric-item rather than whole answers would make regressions easier to read.
+- **Curated-trace drift.** The committed traces are a snapshot; new failures should add their own curated evidence rather than reusing old citations.
 
 ---
