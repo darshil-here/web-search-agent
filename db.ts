@@ -1,10 +1,12 @@
 // db.ts
 //
-// The notebook. One table, because there is exactly one thing we need to
-// remember: what was said, when, and in which session. Claims (milestone 3) get
-// their own table; raw tool payloads never go in here, they live in traces.
+// Two memories, not one:
+//   turns  — what was said, when, in which session. Raw chat history.
+//   claims — the factual claims those answers made, with validity intervals.
+//            This is the ledger that makes "has it changed since then?" possible.
+// Raw tool payloads never go in here; they live in traces.
 //
-// Two time columns on purpose:
+// Two time columns on turns, on purpose:
 //   created_at  UTC ISO-8601, exact instant, used for ordering.
 //   local_date  YYYY-MM-DD in USER_TZ, used for "what did I ask on 3 November".
 // Comparing local dates against UTC timestamps is how date recall silently
@@ -32,7 +34,35 @@ export type NewTurn = {
   localDate: string;
 };
 
-const SCHEMA_VERSION = 1;
+export type Claim = {
+  id: number;
+  sessionId: string;
+  subject: string;
+  attribute: string;
+  value: string;
+  url: string | null;
+  quote: string | null;
+  observedAt: string;
+  localDate: string;
+  validFrom: string;
+  validUntil: string | null;
+  supersededBy: number | null;
+};
+
+export type NewClaim = {
+  sessionId: string;
+  subject: string;
+  attribute: string;
+  value: string;
+  url: string | null;
+  quote: string | null;
+  observedAt: string;
+  localDate: string;
+  /** Defaults to localDate when not supplied by an explicit source date. */
+  validFrom?: string;
+};
+
+const SCHEMA_VERSION = 2;
 
 const MIGRATIONS: Record<number, string> = {
   1: `
@@ -46,6 +76,30 @@ const MIGRATIONS: Record<number, string> = {
     );
     CREATE INDEX turns_session    ON turns(session_id, id);
     CREATE INDEX turns_local_date ON turns(session_id, local_date);
+  `,
+  // A claim is an answer's checkable fact, versioned by validity interval.
+  // We never overwrite a value: a new observation closes the old row
+  // (valid_until, superseded_by) and inserts a new one. That chain is the diff.
+  // local_date exists for the same reason turns have it: "on 3 November" must
+  // not be wrong for the 5.5 hours a day UTC and IST disagree.
+  2: `
+    CREATE TABLE claims (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id    TEXT    NOT NULL,
+      subject       TEXT    NOT NULL,
+      attribute     TEXT    NOT NULL,
+      value         TEXT    NOT NULL,
+      url           TEXT,
+      quote         TEXT,
+      observed_at   TEXT    NOT NULL,
+      local_date    TEXT    NOT NULL,
+      valid_from    TEXT    NOT NULL,
+      valid_until   TEXT,
+      superseded_by INTEGER REFERENCES claims(id)
+    );
+    CREATE INDEX claims_open      ON claims(session_id, subject, attribute, valid_until);
+    CREATE INDEX claims_date      ON claims(session_id, local_date);
+    CREATE INDEX claims_subject   ON claims(session_id, subject, id);
   `,
 };
 
@@ -155,4 +209,145 @@ export function datesWithTurns(
     )
     .all(sessionId)
     .map((row) => (row as { local_date: string }).local_date);
+}
+
+// --- Claim ledger -----------------------------------------------------------
+
+type ClaimRow = {
+  id: number;
+  session_id: string;
+  subject: string;
+  attribute: string;
+  value: string;
+  url: string | null;
+  quote: string | null;
+  observed_at: string;
+  local_date: string;
+  valid_from: string;
+  valid_until: string | null;
+  superseded_by: number | null;
+};
+
+function toClaim(row: ClaimRow): Claim {
+  return {
+    id: row.id,
+    sessionId: row.session_id,
+    subject: row.subject,
+    attribute: row.attribute,
+    value: row.value,
+    url: row.url,
+    quote: row.quote,
+    observedAt: row.observed_at,
+    localDate: row.local_date,
+    validFrom: row.valid_from,
+    validUntil: row.valid_until,
+    supersededBy: row.superseded_by,
+  };
+}
+
+export function saveClaim(
+  db: Database.Database,
+  claim: NewClaim
+): Claim {
+  const info = db
+    .prepare(
+      `INSERT INTO claims
+        (session_id, subject, attribute, value, url, quote,
+         observed_at, local_date, valid_from)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+    .run(
+      claim.sessionId,
+      claim.subject,
+      claim.attribute,
+      claim.value,
+      claim.url,
+      claim.quote,
+      claim.observedAt,
+      claim.localDate,
+      claim.validFrom ?? claim.localDate
+    );
+
+  const row = db
+    .prepare(`SELECT * FROM claims WHERE id = ?`)
+    .get(Number(info.lastInsertRowid)) as ClaimRow;
+  return toClaim(row);
+}
+
+/** The currently-believed value for one subject/attribute, or null. */
+export function openClaim(
+  db: Database.Database,
+  sessionId: string,
+  subject: string,
+  attribute: string
+): Claim | null {
+  const row = db
+    .prepare(
+      `SELECT * FROM claims
+       WHERE session_id = ? AND subject = ? AND attribute = ?
+         AND valid_until IS NULL
+       ORDER BY id DESC LIMIT 1`
+    )
+    .get(sessionId, subject, attribute) as ClaimRow | undefined;
+  return row ? toClaim(row) : null;
+}
+
+/** Close a claim at a date and point it at its replacement. Used on re-check. */
+export function closeClaim(
+  db: Database.Database,
+  id: number,
+  validUntil: string,
+  supersededBy: number
+): void {
+  db.prepare(
+    `UPDATE claims SET valid_until = ?, superseded_by = ?
+     WHERE id = ? AND valid_until IS NULL`
+  ).run(validUntil, supersededBy, id);
+}
+
+/** Every claim observed on a local date, oldest first. */
+export function claimsForDate(
+  db: Database.Database,
+  sessionId: string,
+  localDate: string
+): Claim[] {
+  return (
+    db
+      .prepare(
+        `SELECT * FROM claims
+         WHERE session_id = ? AND local_date = ? ORDER BY id ASC`
+      )
+      .all(sessionId, localDate) as ClaimRow[]
+  ).map(toClaim);
+}
+
+/** All versions of a claim, oldest first — the chain a diff is read from. */
+export function claimsBySubject(
+  db: Database.Database,
+  sessionId: string,
+  subject: string
+): Claim[] {
+  return (
+    db
+      .prepare(
+        `SELECT * FROM claims
+         WHERE session_id = ? AND subject = ? ORDER BY id ASC`
+      )
+      .all(sessionId, subject) as ClaimRow[]
+  ).map(toClaim);
+}
+
+/** The current beliefs for a session. This is what a "what do we know now" recall reads. */
+export function openClaims(
+  db: Database.Database,
+  sessionId: string
+): Claim[] {
+  return (
+    db
+      .prepare(
+        `SELECT * FROM claims
+         WHERE session_id = ? AND valid_until IS NULL ORDER BY id ASC`
+      )
+      .all(sessionId) as ClaimRow[]
+  ).map(toClaim);
 }
