@@ -7,6 +7,8 @@ import {
   recordClaims,
   type ClaimSource,
 } from "./claims.js";
+import { detectRecheck } from "./detect.js";
+import { recheck } from "./recheck.js";
 import { assertTimeZone, describeNow, localDateInTz } from "./dates.js";
 import {
   buildNotebook,
@@ -212,6 +214,42 @@ async function turn(
   // extractor should not pay to read it twice.
   const sources: ClaimSource[] = [];
   let lastStep = 0;
+
+  // Temporal questions take a dedicated, deterministic path. Nothing above
+  // this point changes, and the ordinary loop below is untouched.
+  const intent = detectRecheck(userText, now, ctx.timeZone);
+  if (intent) {
+    const report = await recheck({
+      ctx,
+      intent,
+      userText,
+      now,
+      openai,
+      model,
+      instructions,
+      search: async (q) => {
+        const results = await webSearch(q);
+        searches.push(q);
+        return results;
+      },
+    });
+    tracer.recheck(report);
+    tracer.final({
+      step: 0,
+      content: report.answer,
+      totalMs: performance.now() - runStart,
+      totalTokens,
+      stopReason: "answered",
+    });
+    saveTurn(ctx.db, {
+      sessionId: ctx.sessionId,
+      role: "assistant",
+      content: report.answer,
+      createdAt: new Date().toISOString(),
+      localDate: localDateInTz(new Date(), ctx.timeZone),
+    });
+    return { answer: report.answer, stopReason: "answered" };
+  }
 
   try {
     for (let step = 0; step < MAX_STEPS; step++) {
