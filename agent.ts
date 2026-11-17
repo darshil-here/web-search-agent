@@ -2,6 +2,11 @@
 import { createInterface } from "node:readline";
 import OpenAI from "openai";
 import { openDb, saveTurn } from "./db.js";
+import {
+  extractClaims,
+  recordClaims,
+  type ClaimSource,
+} from "./claims.js";
 import { assertTimeZone, describeNow, localDateInTz } from "./dates.js";
 import {
   buildNotebook,
@@ -107,6 +112,54 @@ async function webSearch(query: string) {
   }));
 }
 
+// Post-answer claim recording. This is pipeline code, not a second tool: the
+// model still exposes exactly one tool (web_search). It is deliberately
+// best-effort — a ledger failure must never turn a good answer into a failed
+// turn, so errors are traced rather than thrown.
+async function ledger(
+  ctx: Context,
+  tracer: Tracer,
+  answer: string,
+  sources: ClaimSource[],
+  now: Date
+): Promise<void> {
+  // No search means no external facts were introduced, so there is nothing to
+  // put in the ledger. Skipping saves an LLM call on arithmetic/memory turns.
+  if (sources.length === 0) return;
+
+  try {
+    const extracted = await extractClaims(openai, model, answer, sources);
+    const result = recordClaims(
+      ctx.db,
+      ctx.sessionId,
+      extracted,
+      now,
+      ctx.timeZone
+    );
+    tracer.claims({
+      extracted: extracted.length,
+      inserted: result.inserted,
+      superseded: result.superseded,
+      unchanged: result.unchanged,
+      claims: result.claims.map((c) => ({
+        subject: c.subject,
+        attribute: c.attribute,
+        value: c.value,
+        url: c.url,
+      })),
+    });
+  } catch (err) {
+    tracer.claims({
+      extracted: 0,
+      inserted: 0,
+      superseded: 0,
+      unchanged: 0,
+      claims: [],
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
 async function turn(
   userText: string,
   ctx: Context
@@ -155,6 +208,9 @@ async function turn(
   const runStart = performance.now();
   let totalTokens = 0;
   const searches: string[] = [];
+  // Deduplicated by URL: the same page can appear in several searches, and the
+  // extractor should not pay to read it twice.
+  const sources: ClaimSource[] = [];
   let lastStep = 0;
 
   try {
@@ -219,6 +275,9 @@ async function turn(
             createdAt: new Date().toISOString(),
             localDate: localDateInTz(new Date(), ctx.timeZone),
           });
+          // Uses the turn's `now` so the claim's local_date agrees with the
+          // question it answers, even across a midnight boundary.
+          await ledger(ctx, tracer, response.output_text, sources, now);
         }
 
         return { answer: response.output_text, stopReason: "answered" };
@@ -234,6 +293,9 @@ async function turn(
 
         const toolStart = performance.now();
         const results = await webSearch(args.query);
+        for (const result of results) {
+          if (!sources.some((s) => s.url === result.url)) sources.push(result);
+        }
         tracer.toolCall({
           step,
           name: call.name,
