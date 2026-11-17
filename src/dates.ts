@@ -1,9 +1,8 @@
-// dates.ts
-//
 // One place that knows what "today" means. The system prompt, the notebook and
 // date recall must all agree, and they must agree in the user's timezone rather
 // than the machine's or UTC. Everything here is pure: pass `now` in, get
 // strings out, so the tests can pin a clock.
+import { pad2 } from "./text.js";
 
 export type DateRef = {
   /** The words the user used, for the trace. */
@@ -92,16 +91,12 @@ export function describeNow(
   };
 }
 
-function pad(value: number): string {
-  return String(value).padStart(2, "0");
-}
-
 /** YYYY-MM-DD or null if the day does not exist (31 February). */
 function civil(year: number, month: number, day: number): string | null {
   if (month < 1 || month > 12 || day < 1 || day > 31) return null;
   const utc = new Date(Date.UTC(year, month - 1, day));
   if (utc.getUTCMonth() !== month - 1 || utc.getUTCDate() !== day) return null;
-  return `${utc.getUTCFullYear()}-${pad(utc.getUTCMonth() + 1)}-${pad(
+  return `${utc.getUTCFullYear()}-${pad2(utc.getUTCMonth() + 1)}-${pad2(
     utc.getUTCDate()
   )}`;
 }

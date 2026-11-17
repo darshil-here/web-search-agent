@@ -1,5 +1,3 @@
-// notebook.ts
-//
 // What the model is allowed to remember, per turn. This is retrieval, not a
 // tool: the loop decides what goes in the prompt, so the rule "one tool" is
 // kept and the model cannot improvise a memory.
@@ -11,15 +9,9 @@
 //
 // The output has a hard byte budget. Memory that grows without a bound is a
 // token bill and a slower first step on every question.
-import type Database from "better-sqlite3";
-import { recentTurns, turnsOnDate, type Turn } from "./db.js";
+import { recentTurns, turnsOnDate, type SessionContext, type Turn } from "./db.js";
 import { describeNow, parseDateRefs, type DateRef } from "./dates.js";
-
-export type NotebookContext = {
-  db: Database.Database;
-  sessionId: string;
-  timeZone: string;
-};
+import { clipWithEllipsis } from "./text.js";
 
 export type Notebook = {
   text: string;
@@ -35,14 +27,11 @@ export const NOTEBOOK_MAX_BYTES = 4096;
 const TURN_CLIP = 600;
 const RECENT_TURNS = 8;
 
-function clip(text: string, max: number): string {
-  // Collapse to one line: the notebook is a compact index, not a transcript.
-  const flat = text.replace(/\s+/g, " ").trim();
-  return flat.length <= max ? flat : `${flat.slice(0, max - 1)}…`;
-}
-
 function turnLine(turn: Turn): string {
-  return `  ${turn.role} (${turn.createdAt}): ${clip(turn.content, TURN_CLIP)}`;
+  return `  ${turn.role} (${turn.createdAt}): ${clipWithEllipsis(
+    turn.content,
+    TURN_CLIP
+  )}`;
 }
 
 function render(
@@ -74,7 +63,7 @@ function render(
 }
 
 export function buildNotebook(
-  ctx: NotebookContext,
+  ctx: SessionContext,
   userText: string,
   now: Date
 ): Notebook {

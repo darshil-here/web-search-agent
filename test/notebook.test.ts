@@ -5,8 +5,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { rmSync } from "node:fs";
-import { openDb, saveTurn } from "./db.js";
-import { buildNotebook, NOTEBOOK_MAX_BYTES } from "./notebook.js";
+import { openDb, saveTurn } from "../src/db.js";
+import { buildNotebook, NOTEBOOK_MAX_BYTES } from "../src/notebook.js";
 
 const PATH = "data/notebook-test.db";
 const IST = "Asia/Kolkata";

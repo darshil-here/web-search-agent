@@ -1,7 +1,7 @@
 // detect.test.ts
 import test from "node:test";
 import assert from "node:assert/strict";
-import { detectRecheck } from "./detect.js";
+import { detectRecheck } from "../src/detect.js";
 
 const NOW = new Date("2026-11-17T06:00:00Z"); // Tuesday in IST
 const IST = "Asia/Kolkata";

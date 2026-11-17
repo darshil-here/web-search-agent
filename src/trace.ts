@@ -1,22 +1,48 @@
-// trace.ts
+// Per-run evidence: one .md for a human and one .jsonl for a script, recording
+// what was injected, what the model did, what it cost and where it failed.
+// This module records what it is given; callers own the printing.
 import { createHash } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { format } from "node:util";
-import type { RecheckReport } from "./recheck.js";
+import type { LlmCall, StopReason, ToolCall } from "./llm.js";
+import { flatten, pad2 } from "./text.js";
 
-const TRACES_DIR = "traces";
-
-export type TokenUsage = {
-  prompt: number;
-  completion: number;
-  total: number;
+export type ClaimEvent = {
+  extracted: number;
+  inserted: number;
+  superseded: number;
+  unchanged: number;
+  claims: Array<{
+    subject: string;
+    attribute: string;
+    value: string;
+    url: string | null;
+  }>;
+  error?: string;
 };
 
-export type ToolResult = {
-  title: string;
-  url: string;
-  content: string;
+/**
+ * What the re-check section needs. Declared here rather than imported from
+ * recheck.ts so the trace layer does not depend on a pipeline it happens to
+ * render; recheck's report is checked against this shape at the call site.
+ */
+export type RecheckTrace = {
+  intent: { date: string; phrase: string };
+  queries: string[];
+  claimsChecked: number;
+  failedSearches: number;
+  usedSearch: boolean;
+  writeBack: { inserted: number; superseded: number; verifications: number };
+  fresh: Array<{
+    claimId: number;
+    value: string;
+    url: string | null;
+    status: string;
+    mismatch?: boolean;
+    matchedAttribute?: string | null;
+  }>;
+  errors: { extraction?: string; writeBack?: string };
 };
 
 type RunStart = {
@@ -37,47 +63,14 @@ type Recall = {
   truncated: boolean;
 };
 
-export type LlmCall = {
-  step: number;
-  ms: number;
-  usage: TokenUsage;
-  toolCallCount: number;
-};
-
-type ToolCall = {
-  step: number;
-  name: string;
-  args: unknown;
-  ms: number;
-  results: ToolResult[];
-};
-
 type Final = {
-  step: number;
+  steps: number;
   content: string;
   totalMs: number;
-  totalTokens: number;
-  stopReason: "answered" | "budget";
+  stopReason: StopReason;
 };
 
-type TraceError = {
-  step: number;
-  message: string;
-};
-
-export type ClaimEvent = {
-  extracted: number;
-  inserted: number;
-  superseded: number;
-  unchanged: number;
-  claims: Array<{
-    subject: string;
-    attribute: string;
-    value: string;
-    url: string | null;
-  }>;
-  error?: string;
-};
+type TraceError = { message: string };
 
 type TraceEvent = {
   type: string;
@@ -89,16 +82,16 @@ export function promptVersion(instructions: string): string {
   return createHash("sha256").update(instructions).digest("hex").slice(0, 8);
 }
 
-function pad(value: number): string {
-  return String(value).padStart(2, "0");
-}
-
 function datePart(date: Date): string {
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(
+    date.getDate()
+  )}`;
 }
 
 function timePart(date: Date): string {
-  return `${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`;
+  return `${pad2(date.getHours())}${pad2(date.getMinutes())}${pad2(
+    date.getSeconds()
+  )}`;
 }
 
 function slugify(question: string): string {
@@ -112,28 +105,32 @@ function slugify(question: string): string {
 }
 
 function tableCell(value: string): string {
-  return value.replace(/\|/g, "\\|").replace(/\r?\n/g, " ");
+  return flatten(value).replace(/\|/g, "\\|");
 }
 
 export class Tracer {
-  private readonly question: string;
-  private readonly startedAt: Date;
+  private readonly startedAt = new Date();
   private readonly rawLines: string[] = [];
   private readonly llmCalls: LlmCall[] = [];
   private readonly toolCalls: ToolCall[] = [];
   private readonly events: TraceEvent[] = [];
   private readonly errors: TraceError[] = [];
-  private readonly originalLog = console.log.bind(console);
   private meta: RunStart | undefined;
   private finalInfo: Final | undefined;
   private recallInfo: Recall | undefined;
   private claimInfo: ClaimEvent | undefined;
-  private recheckInfo: RecheckReport | undefined;
+  private recheckInfo: RecheckTrace | undefined;
   private flushedPath: string | undefined;
 
-  constructor(question: string) {
-    this.question = question;
-    this.startedAt = new Date();
+  constructor(
+    private readonly question: string,
+    private readonly dir: string
+  ) {}
+
+  /** The run's own output: printed and kept for the raw section of the trace. */
+  log(...args: unknown[]): void {
+    this.rawLines.push(format(...args));
+    console.log(...args);
   }
 
   runStart(meta: RunStart): void {
@@ -148,12 +145,6 @@ export class Tracer {
       promptVersion: meta.promptVersion,
       systemPrompt: meta.systemPrompt.slice(0, 4000),
     });
-
-    // Tee console.log into the trace while keeping the terminal output identical.
-    console.log = (...args: unknown[]) => {
-      this.rawLines.push(format(...args));
-      this.originalLog(...args);
-    };
   }
 
   llmCall(call: LlmCall): void {
@@ -206,18 +197,8 @@ export class Tracer {
     });
   }
 
-  recheck(report: RecheckReport): void {
+  recheck(report: RecheckTrace): void {
     this.recheckInfo = report;
-    // Feed the re-check's model calls into the same summary table as the
-    // ordinary loop, so a re-check run never reports zero steps or tokens.
-    this.llmCalls.push(...report.llmCalls);
-    for (const call of report.llmCalls) {
-      this.events.push({
-        type: "llm_call",
-        ts: new Date().toISOString(),
-        ...call,
-      });
-    }
     this.events.push({
       type: "recheck",
       ts: new Date().toISOString(),
@@ -230,7 +211,6 @@ export class Tracer {
     this.events.push({
       type: "error",
       ts: new Date().toISOString(),
-      step: info.step,
       message: info.message,
     });
   }
@@ -238,19 +218,15 @@ export class Tracer {
   flush(): string {
     if (this.flushedPath) return this.flushedPath;
 
-    // Stop capturing before the caller prints the trace pointer line.
-    console.log = this.originalLog;
+    const base = `${datePart(this.startedAt)}-${timePart(
+      this.startedAt
+    )}-${slugify(this.question)}`;
+    mkdirSync(this.dir, { recursive: true });
 
-    const base = `${datePart(this.startedAt)}-${timePart(this.startedAt)}-${slugify(
-      this.question
-    )}`;
-    const mdPath = join(TRACES_DIR, `${base}.md`);
-    const jsonlPath = join(TRACES_DIR, `${base}.jsonl`);
-
-    mkdirSync(TRACES_DIR, { recursive: true });
+    const mdPath = join(this.dir, `${base}.md`);
     writeFileSync(mdPath, this.renderMarkdown(), "utf8");
     writeFileSync(
-      jsonlPath,
+      join(this.dir, `${base}.jsonl`),
       this.events.map((event) => JSON.stringify(event)).join("\n") + "\n",
       "utf8"
     );
@@ -277,12 +253,16 @@ export class Tracer {
     };
 
     const rows = this.llmCalls.map((call) => {
-      const callsThisStep = this.toolCalls.filter((t) => t.step === call.step);
+      const toolsThisCall =
+        call.step === null
+          ? []
+          : this.toolCalls.filter((tool) => tool.step === call.step);
       return {
+        label: call.label,
         step: call.step,
         llmMs: Math.round(call.ms),
-        toolsMs: callsThisStep.reduce((sum, t) => sum + Math.round(t.ms), 0),
-        toolCalls: callsThisStep.length,
+        toolsMs: toolsThisCall.reduce((sum, tool) => sum + Math.round(tool.ms), 0),
+        toolCalls: toolsThisCall.length,
         prompt: call.usage.prompt,
         completion: call.usage.completion,
         total: call.usage.total,
@@ -318,7 +298,7 @@ export class Tracer {
       `timezone: ${JSON.stringify(meta.timeZone)}`,
       `command: ${JSON.stringify(meta.command)}`,
       `prompt_version: ${JSON.stringify(meta.promptVersion)}`,
-      `steps: ${this.llmCalls.length}`,
+      `model_calls: ${this.llmCalls.length}`,
       `tool_calls: ${this.toolCalls.length}`,
       `claims: ${this.claimInfo?.extracted ?? 0}`,
       `recheck_claims: ${this.recheckInfo?.claimsChecked ?? 0}`,
@@ -344,18 +324,20 @@ export class Tracer {
       "",
       "## Summary",
       "",
-      "| step | llm ms | tools ms | tool calls | prompt tokens | completion tokens | total tokens |",
-      "|-----:|-------:|---------:|-----------:|--------------:|------------------:|-------------:|",
+      "| phase | step | llm ms | tools ms | tool calls | prompt tokens | completion tokens | total tokens |",
+      "|-------|-----:|-------:|---------:|-----------:|--------------:|------------------:|-------------:|",
     ];
 
     for (const row of rows) {
       lines.push(
-        `| ${row.step} | ${row.llmMs} | ${row.toolsMs} | ${row.toolCalls} | ${row.prompt} | ${row.completion} | ${row.total} |`
+        `| ${row.label} | ${row.step ?? "–"} | ${row.llmMs} | ${row.toolsMs} | ` +
+          `${row.toolCalls} | ${row.prompt} | ${row.completion} | ${row.total} |`
       );
     }
 
     lines.push(
-      `| **total** | **${totals.llmMs}** | **${totals.toolsMs}** | **${totals.toolCalls}** | **${totals.prompt}** | **${totals.completion}** | **${totals.total}** |`
+      `| **total** | | **${totals.llmMs}** | **${totals.toolsMs}** | **${totals.toolCalls}** | ` +
+        `**${totals.prompt}** | **${totals.completion}** | **${totals.total}** |`
     );
 
     if (this.recallInfo) {
@@ -419,9 +401,15 @@ export class Tracer {
           `${r.writeBack.verifications} |`,
         ""
       );
-      for (const f of r.fresh) {
+      if (r.errors.extraction) {
+        lines.push(`**Fresh-value extraction failed:** ${r.errors.extraction}`, "");
+      }
+      if (r.errors.writeBack) {
+        lines.push(`**Ledger write-back failed:** ${r.errors.writeBack}`, "");
+      }
+      for (const fresh of r.fresh) {
         lines.push(
-          `- claim ${f.claimId}: ${f.status} — ${f.value || "no value"} ${f.url ?? ""}`
+          `- claim ${fresh.claimId}: ${fresh.status} — ${fresh.value || "no value"} ${fresh.url ?? ""}`
         );
       }
       lines.push("");
@@ -440,7 +428,7 @@ export class Tracer {
     if (this.errors.length > 0) {
       lines.push("", "## Error", "");
       for (const error of this.errors) {
-        lines.push(`**Step ${error.step}:**`, "", "````", error.message, "````", "");
+        lines.push("````", error.message, "````", "");
       }
     }
 

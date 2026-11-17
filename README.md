@@ -16,6 +16,13 @@ npm run dev
 `npm run dev` opens a chat session on stdin. `exit` or Ctrl-D ends it. A single
 question can also be passed as an argument: `npm start -- "what is 17 times 23"`.
 
+## Layout
+
+- `src/` — the agent, split by responsibility (see `DESIGN.md`).
+- `test/` — unit and pipeline tests; `npm test` discovers them.
+- `scripts/` — `db-check.ts`, a schema smoke check against a throwaway database.
+- `data/` and `traces/` — runtime output, gitignored.
+
 ## Required environment variables
 
 - `OPENAI_API_KEY` — API key used by the model client.
@@ -27,6 +34,7 @@ Optional, with defaults:
 - `SESSION_ID` (default `local`) — which conversation's turns are read and written.
 - `USER_TZ` (default `UTC`) — the timezone "today" and "yesterday" resolve in.
 - `DB_PATH` (default `data/agent.db`) — SQLite file.
+- `TRACES_DIR` (default `traces`) — where the per-run `.md`/`.jsonl` evidence goes.
 - `MAX_STEPS` (default `5`) — model turns before the loop gives up and says so.
 - `MAX_RECHECK_SEARCHES` (default `8`) — subjects a single temporal re-check may search.
 
@@ -40,7 +48,7 @@ retrieval, not a tool: the schema still holds exactly one tool.
 
 The notebook is capped at 4 KB. When it drops turns it says so.
 
-## Claim ledger (schema v2)
+## Claim ledger (schema v3)
 
 Answers that used web search get one extra, non-fatal pipeline step: a
 structured-output call extracts checkable facts as
@@ -77,7 +85,7 @@ re-verified today is not mistaken for one never checked. Set
 
 ```sh
 npm run dev        # chat
-npm test           # date, notebook and claim-ledger tests, no network
+npm test           # date, model, ledger, re-check and trace tests, no network
 npm run typecheck  # tsc --noEmit
 npm run db:check   # exercise the schema against data/db-check.db
 npm run db:reset   # delete data/agent.db
@@ -87,5 +95,6 @@ npm run db:reset   # delete data/agent.db
 
 Each turn writes `traces/<date>-<time>-<slug>.md` and `.jsonl`: steps, tokens,
 latency, search queries, sources, the notebook that was injected, the claims
-recorded (including extraction errors), and a verdict (`ok`, `incomplete`,
-`error`). Traces are gitignored; `FAILURES.md` quotes the runs it cites.
+recorded (including extraction errors), the re-check diff, and a verdict
+(`ok`, `incomplete`, `error`). Set `TRACES_DIR` to move them. Traces are
+gitignored; `FAILURES.md` quotes the runs it cites.

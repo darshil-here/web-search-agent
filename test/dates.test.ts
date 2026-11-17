@@ -10,7 +10,7 @@ import {
   describeNow,
   localDateInTz,
   parseDateRefs,
-} from "./dates.js";
+} from "../src/dates.js";
 
 const IST = "Asia/Kolkata";
 // 19:00Z on 16 November is already 00:30 on 17 November in IST.

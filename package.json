@@ -3,11 +3,11 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "start": "tsx --env-file=.env agent.ts",
-    "dev": "tsx --env-file=.env agent.ts",
+    "start": "tsx --env-file=.env src/agent.ts",
+    "dev": "tsx --env-file=.env src/agent.ts",
     "trace": "npm start --",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test dates.test.ts notebook.test.ts claims.test.ts detect.test.ts recheck.test.ts",
+    "test": "tsx --test",
     "db:check": "tsx scripts/db-check.ts",
     "db:reset": "rm -f data/agent.db data/agent.db-wal data/agent.db-shm"
   },

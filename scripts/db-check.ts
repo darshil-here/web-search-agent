@@ -1,21 +1,16 @@
-// scripts/db-check.ts
-//
-// Checks the notebook without touching the model or the network. Run with:
+// Smoke-checks the schema on a real file: dates, session scoping, ordering and
+// migration on reopen. The ledger rules are covered by the test suite. Run with:
 //   npx tsx scripts/db-check.ts
 // It writes data/db-check.db, never data/agent.db.
 import assert from "node:assert/strict";
 import { rmSync } from "node:fs";
 import {
-  claimsBySubject,
   datesWithTurns,
-  openClaim,
-  openClaims,
   openDb,
   recentTurns,
   saveTurn,
   turnsOnDate,
-} from "../db.js";
-import { recordClaims } from "../claims.js";
+} from "../src/db.js";
 
 const PATH = "data/db-check.db";
 for (const suffix of ["", "-wal", "-shm"]) rmSync(PATH + suffix, { force: true });
@@ -107,35 +102,6 @@ check("data survives closing and reopening the file", () => {
 
 check("schema is v3 and the claim ledger is present", () => {
   assert.equal(db.pragma("user_version", { simple: true }), 3);
-});
-
-check("a claim is stored with a local date and no end date", () => {
-  recordClaims(
-    db,
-    "s1",
-    [{ subject: "Neon free tier", attribute: "storage", value: "10 GB", url: "https://neon.com/pricing", quote: "10 GB" }],
-    new Date("2026-11-16T19:00:00Z"),
-    "Asia/Kolkata"
-  );
-  const claim = openClaim(db, "s1", "Neon free tier", "storage");
-  assert.equal(claim?.value, "10 GB");
-  assert.equal(claim?.localDate, "2026-11-17");
-  assert.equal(claim?.validUntil, null);
-});
-
-check("a changed value supersedes rather than overwrites", () => {
-  recordClaims(
-    db,
-    "s1",
-    [{ subject: "Neon free tier", attribute: "storage", value: "512 MB", url: "https://neon.com/pricing", quote: "512 MB" }],
-    new Date("2026-11-18T06:00:00Z"),
-    "Asia/Kolkata"
-  );
-  const chain = claimsBySubject(db, "s1", "Neon free tier");
-  assert.deepEqual(chain.map((c) => c.value), ["10 GB", "512 MB"]);
-  assert.equal(chain[0].validUntil, "2026-11-18");
-  assert.equal(chain[0].supersededBy, chain[1].id);
-  assert.equal(openClaims(db, "s1").length, 1);
 });
 
 db.close();

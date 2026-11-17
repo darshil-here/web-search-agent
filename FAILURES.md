@@ -185,9 +185,9 @@ in prose, but the ledger did not.
 **Class:** claim granularity / attribute drift
 **Locus:** `claims.ts` (extraction) and `recheck.ts` (fresh-value matching)
 **Fix:** two changes. (1) `claims.ts` now receives the user's question and
-applies a deterministic `anchorConcept` step in `sanitise`, so a sibling word
-in the answer ("LTS") cannot overwrite the concept the question asked about
-("stable"); the recorded attribute is now `latest stable version`. (2)
+applies a deterministic `anchorAttribute` step (`concepts.ts`) in `sanitise`, so
+a sibling word in the answer ("LTS") cannot overwrite the concept the question
+asked about ("stable"); the recorded attribute is now `latest stable version`. (2)
 `recheck.ts` extraction must report `matchedAttribute` (the concept the source
 actually describes) and `enforceAttributeMatch` downgrades `unchanged` to
 `not_found` when that concept differs from the recorded attribute. The diff

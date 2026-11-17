@@ -1,19 +1,16 @@
-// recheck.test.ts
-//
-// All re-check tests use a stubbed webSearch and a stubbed OpenAI client:
-// no network, no API key. Run with: npm test
+// All re-check tests use a stubbed search and a stubbed model: no network, no
+// API key. Run with: npm test
 import test from "node:test";
 import assert from "node:assert/strict";
 import { rmSync } from "node:fs";
-import type OpenAI from "openai";
 import {
   openClaim,
   openDb,
   verificationsForClaim,
   type Claim,
-} from "./db.js";
-import { recordClaims } from "./claims.js";
-import { Tracer } from "./trace.js";
+} from "../src/db.js";
+import { recordClaims } from "../src/claims.js";
+import type { Llm, TurnRequest, Usage } from "../src/llm.js";
 import {
   buildQueries,
   extractFreshValues,
@@ -22,7 +19,9 @@ import {
   recheck,
   enforceAttributeMatch,
   type FreshValue,
-} from "./recheck.js";
+} from "../src/recheck.js";
+
+const NO_USAGE: Usage = { prompt: 0, completion: 0, total: 0 };
 
 function c(
   id: number,
@@ -51,10 +50,12 @@ const SOURCES = [
   { title: "Neon", url: "https://neon.com/pricing", content: "512 MB storage free" },
 ];
 
-function stub(payload: unknown): OpenAI {
+/** A model that returns one structured payload and an answer of the caller's choosing. */
+function stubLlm(data: unknown, answer = ""): Llm {
   return {
-    responses: { create: async () => ({ output_text: JSON.stringify(payload) }) },
-  } as unknown as OpenAI;
+    structured: async <T>() => ({ data: data as T, usage: NO_USAGE }),
+    turn: async () => ({ text: answer, stopReason: "answered" }),
+  };
 }
 
 test("buildQueries makes one query per distinct subject", () => {
@@ -70,8 +71,8 @@ test("buildQueries makes one query per distinct subject", () => {
 
 test("extraction maps results to claims and strips invented URLs", async () => {
   const claims = [c(1, "Neon free tier", "storage", "10 GB", "2026-11-03")];
-  const fresh = await extractFreshValues(
-    stub({
+  const { fresh } = await extractFreshValues(
+    stubLlm({
       results: [
         {
           claimId: 1,
@@ -89,7 +90,6 @@ test("extraction maps results to claims and strips invented URLs", async () => {
         },
       ],
     }),
-    "stub",
     claims,
     SOURCES
   );
@@ -100,7 +100,11 @@ test("extraction maps results to claims and strips invented URLs", async () => {
 
 test("a claim with no extraction row becomes not_found", async () => {
   const claims = [c(1, "Neon free tier", "storage", "10 GB", "2026-11-03")];
-  const fresh = await extractFreshValues(stub({ results: [] }), "stub", claims, SOURCES);
+  const { fresh } = await extractFreshValues(
+    stubLlm({ results: [] }),
+    claims,
+    SOURCES
+  );
   assert.deepEqual(fresh, [
     { claimId: 1, value: "", url: null, quote: null, status: "not_found" },
   ]);
@@ -108,7 +112,7 @@ test("a claim with no extraction row becomes not_found", async () => {
 
 test("buildDiff renders old -> new with status and dates", () => {
   const claims = [c(1, "Neon free tier", "storage", "10 GB", "2026-11-03")];
-  const fresh: import("./recheck.js").FreshValue[] = [
+  const fresh: FreshValue[] = [
     {
       claimId: 1,
       value: "512 MB",
@@ -117,13 +121,12 @@ test("buildDiff renders old -> new with status and dates", () => {
       status: "changed",
     },
   ];
-  const { text, results } = buildDiff(claims, fresh);
+  const text = buildDiff(claims, fresh);
   assert.match(text, /Neon free tier/);
   assert.match(text, /10 GB/);
   assert.match(text, /512 MB/);
   assert.match(text, /changed/);
   assert.match(text, /2026-11-03/);
-  assert.equal(results.length, 1);
 });
 
 // --- write-back -------------------------------------------------------------
@@ -202,14 +205,6 @@ test("unchanged writes only a verification; not_found leaves the claim open", ()
 
 // --- orchestration ----------------------------------------------------------
 
-function stubFull(payload: unknown): OpenAI {
-  return {
-    responses: {
-      create: async () => ({ output_text: JSON.stringify(payload), output: [] }),
-    },
-  } as unknown as OpenAI;
-}
-
 test("recheck falls back to open claims when the named date is empty", async () => {
   const db = freshDb();
   const claim = recordClaims(
@@ -222,21 +217,23 @@ test("recheck falls back to open claims when the named date is empty", async () 
     intent: { date: "2026-11-03", phrase: "still correct" },
     userText: "What did I ask on 3 November? Is your answer still correct today?",
     now: NOW,
-    openai: stubFull({
-      results: [
-        {
-          claimId: claim.id,
-          value: "v26.13.1",
-          url: "https://nodejs.org/en/download",
-          quote: "v26.13.1 Latest LTS",
-          status: "unchanged",
-        },
-      ],
-    }),
-    model: "stub",
+    llm: stubLlm(
+      {
+        results: [
+          {
+            claimId: claim.id,
+            value: "v26.13.1",
+            url: "https://nodejs.org/en/download",
+            quote: "v26.13.1 Latest LTS",
+            status: "unchanged",
+          },
+        ],
+      },
+      "No change: v26.13.1 is still the latest LTS."
+    ),
     instructions: "You are a research assistant.",
-    search: async (q) => {
-      searches.push(q);
+    search: async (query) => {
+      searches.push(query);
       return [
         {
           title: "Node",
@@ -245,12 +242,15 @@ test("recheck falls back to open claims when the named date is empty", async () 
         },
       ];
     },
+    maxSearches: 8,
   });
 
   assert.equal(report.claimsChecked, 1);
   assert.equal(searches.length, 1);
   assert.equal(report.fresh[0].status, "unchanged");
   assert.equal(report.writeBack.verifications, 1);
+  assert.equal(report.stopReason, "answered");
+  assert.equal(report.llmCalls[0].label, "extract");
   db.close();
 });
 
@@ -263,13 +263,13 @@ test("recheck abstains with zero searches when there is nothing to check", async
     intent: { date: "2026-11-03", phrase: "changed since" },
     userText: "Has anything changed since 3 November?",
     now: NOW,
-    openai: stubFull({ results: [] }),
-    model: "stub",
+    llm: stubLlm({ results: [] }),
     instructions: "You are a research assistant.",
     search: async () => {
       called = true;
       return [];
     },
+    maxSearches: 8,
   });
 
   assert.equal(called, false);
@@ -318,8 +318,8 @@ test("the same attribute with different wording still matches", () => {
 
 test("extraction applies the attribute guard and the diff surfaces the mismatch", async () => {
   const claim = c(1, "Node.js", "latest stable release", "v26.13.1", "2026-11-03");
-  const fresh = await extractFreshValues(
-    stub({
+  const { fresh } = await extractFreshValues(
+    stubLlm({
       results: [
         {
           claimId: 1,
@@ -331,75 +331,63 @@ test("extraction applies the attribute guard and the diff surfaces the mismatch"
         },
       ],
     }),
-    "stub",
     [claim],
     SOURCES
   );
 
   assert.equal(fresh[0].status, "not_found");
-  const { text } = buildDiff([claim], fresh);
+  const text = buildDiff([claim], fresh);
   assert.match(text, /source describes/);
   assert.match(text, /latest LTS release/);
 });
 
-test("an answer call that requests a search gets it executed", async () => {
+test("a search the answer turn runs is reported as used", async () => {
   const db = freshDb();
   const claim = recordClaims(
     db, "s", [extracted("A", "price", "$10")], NOW, IST
   ).claims[0];
-  let calls = 0;
-  const client = {
-    responses: {
-      create: async () => {
-        calls++;
-        if (calls === 1) {
-          return {
-            output_text: JSON.stringify({
-              results: [
-                {
-                  claimId: claim.id,
-                  value: "$10",
-                  url: "https://neon.com/pricing",
-                  quote: "$10",
-                  status: "unchanged",
-                  matchedAttribute: "price",
-                },
-              ],
-            }),
-            output: [],
-          };
-        }
-        if (calls === 2) {
-          return {
-            output_text: "",
-            output: [
-              {
-                type: "function_call",
-                call_id: "call-1",
-                name: "web_search",
-                arguments: JSON.stringify({ query: "A price" }),
-              },
-            ],
-          };
-        }
-        return { output_text: "Still $10.", output: [] };
-      },
-    },
-  } as unknown as OpenAI;
   let searched = "";
+
+  const llm: Llm = {
+    structured: async <T>() => ({
+      data: {
+        results: [
+          {
+            claimId: claim.id,
+            value: "$10",
+            url: "https://neon.com/pricing",
+            quote: "$10",
+            status: "unchanged",
+            matchedAttribute: "price",
+          },
+        ],
+      } as T,
+      usage: NO_USAGE,
+    }),
+    turn: async (request: TurnRequest) => {
+      // The safety valve: the answer admits the diff is inconclusive and asks
+      // for one more search, which must actually run.
+      await request.search("A price");
+      request.onEvent?.({
+        type: "tool",
+        call: { step: 1, name: "web_search", args: { query: "A price" }, ms: 1, results: [] },
+      });
+      return { text: "Still $10.", stopReason: "answered" };
+    },
+  };
 
   const report = await recheck({
     ctx: { db, sessionId: "s", timeZone: IST },
     intent: { date: "2026-11-17", phrase: "still correct" },
     userText: "Is A still correct?",
     now: NOW,
-    openai: client,
-    model: "stub",
+    llm,
     instructions: "You are a research assistant.",
-    search: async (q) => {
-      searched = q;
+    search: async (query) => {
+      searched = query;
       return [{ title: "A", url: "https://neon.com/pricing", content: "$10" }];
     },
+    maxSearches: 8,
   });
 
   assert.equal(searched, "A price");
@@ -408,34 +396,35 @@ test("an answer call that requests a search gets it executed", async () => {
   db.close();
 });
 
-test("tracer records a recheck event and renders its section", () => {
-  const t = new Tracer("test");
-  t.recheck({
-    answer: "no change",
-    intent: { date: "2026-11-03", phrase: "still correct" },
-    queries: ["Node.js latest LTS release"],
-    claimsChecked: 1,
-    failedSearches: 0,
-    writeBack: { inserted: 0, superseded: 0, verifications: 1 },
-    usedSearch: false,
-    fresh: [
-      {
-        claimId: 1,
-        value: "v26.13.1",
-        url: null,
-        quote: null,
-        status: "unchanged",
-      },
+test("a failed extraction is reported and leaves every claim not_found", async () => {
+  const db = freshDb();
+  recordClaims(
+    db, "s", [extracted("A", "price", "$10")], NOW, IST
+  );
+
+  const llm: Llm = {
+    structured: async () => {
+      throw new Error("model unavailable");
+    },
+    turn: async () => ({ text: "I could not verify the current price.", stopReason: "answered" }),
+  };
+
+  const report = await recheck({
+    ctx: { db, sessionId: "s", timeZone: IST },
+    intent: { date: "2026-11-17", phrase: "still correct" },
+    userText: "Is A still correct?",
+    now: NOW,
+    llm,
+    instructions: "You are a research assistant.",
+    search: async () => [
+      { title: "A", url: "https://neon.com/pricing", content: "$10" },
     ],
-    llmCalls: [
-      {
-        step: 0,
-        ms: 10,
-        usage: { prompt: 100, completion: 20, total: 120 },
-        toolCallCount: 0,
-      },
-    ],
+    maxSearches: 8,
   });
-  const path = t.flush();
-  assert.ok(path.endsWith(".md"));
+
+  assert.equal(report.errors.extraction, "model unavailable");
+  assert.equal(report.fresh[0].status, "not_found");
+  assert.equal(report.answer, "I could not verify the current price.");
+  assert.equal(report.writeBack.verifications, 1);
+  db.close();
 });

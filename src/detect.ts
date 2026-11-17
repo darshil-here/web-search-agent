@@ -1,5 +1,3 @@
-// detect.ts
-//
 // Decides whether a question is a temporal re-check. Pure and cheap: no model
 // call, no network. Requires both a date reference and a re-check phrase, so
 // plain history recall ("what did I ask on 3 November?") stays on the ordinary

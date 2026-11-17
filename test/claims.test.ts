@@ -1,31 +1,29 @@
-// claims.test.ts
-//
 // The ledger's reconcile logic and the extraction sanitizer are pure given a
 // DB and a stubbed model. No network, no API key. Run with: npm test
 import test from "node:test";
 import assert from "node:assert/strict";
 import { rmSync } from "node:fs";
-import type OpenAI from "openai";
 import {
   claimsBySubject,
   claimsForDate,
   openClaim,
   openClaims,
   openDb,
-  recentVerifications,
   saveVerification,
   verificationsForClaim,
-} from "./db.js";
+} from "../src/db.js";
 import {
   extractClaims,
   recordClaims,
-  type ClaimSource,
   type ExtractedClaim,
-} from "./claims.js";
+} from "../src/claims.js";
+import type { Llm, StructuredRequest, Usage } from "../src/llm.js";
+import type { SearchResult } from "../src/search.js";
 
 const PATH = "data/claims-test.db";
 const IST = "Asia/Kolkata";
 const NOW = new Date("2026-11-16T19:00:00Z"); // 00:30 on 17 Nov in IST
+const NO_USAGE: Usage = { prompt: 0, completion: 0, total: 0 };
 
 function freshDb() {
   for (const suffix of ["", "-wal", "-shm"]) rmSync(PATH + suffix, { force: true });
@@ -40,19 +38,17 @@ function claim(
   return { subject, attribute, value, url: "https://example.com/pricing", quote: "quoted" };
 }
 
-// --- record / reconcile -----------------------------------------------------
+function stubLlm(data: unknown): Llm {
+  return {
+    // The real method is generic; a fake answers every request with one payload.
+    structured: async <T>() => ({ data: data as T, usage: NO_USAGE }),
+    turn: async () => {
+      throw new Error("claim extraction does not run a tool loop");
+    },
+  };
+}
 
-test("a fresh DB opens at schema v3 with claims and verification tables", () => {
-  const db = freshDb();
-  const tables = db
-    .prepare(`SELECT name FROM sqlite_master WHERE type = 'table'`)
-    .all()
-    .map((r) => (r as { name: string }).name);
-  assert.ok(tables.includes("claims"));
-  assert.equal(db.pragma("user_version", { simple: true }), 3);
-  assert.ok(tables.includes("verifications"));
-  db.close();
-});
+// --- record / reconcile -----------------------------------------------------
 
 test("a verification records a check in the user's timezone", () => {
   const db = freshDb();
@@ -70,7 +66,6 @@ test("a verification records a check in the user's timezone", () => {
   });
   assert.equal(v.result, "unchanged");
   assert.equal(verificationsForClaim(db, "s", c.id).length, 1);
-  assert.equal(recentVerifications(db, "s", 10)[0].claimId, c.id);
   db.close();
 });
 
@@ -110,7 +105,7 @@ test("an identical re-observation is a no-op (idempotent)", () => {
 
 test("a changed value closes the old row and links it to the new one", () => {
   const db = freshDb();
-  const first = recordClaims(db, "s", [claim("Neon free tier", "storage", "10 GB")], NOW, IST);
+  recordClaims(db, "s", [claim("Neon free tier", "storage", "10 GB")], NOW, IST);
   const later = new Date("2026-11-18T06:00:00Z");
   const second = recordClaims(db, "s", [claim("Neon free tier", "storage", "512 MB")], later, IST);
 
@@ -118,8 +113,6 @@ test("a changed value closes the old row and links it to the new one", () => {
   assert.equal(second.superseded, 1);
 
   const fresh = second.claims[0];
-  // Re-read the old row: closeClaim mutates it after the first call returned,
-  // so the insert-time snapshot in `first.claims` is intentionally stale.
   const old = claimsBySubject(db, "s", "Neon free tier")[0];
   assert.equal(old.validUntil, "2026-11-18");
   assert.equal(old.supersededBy, fresh.id);
@@ -184,21 +177,13 @@ test("claims are queried by local date and scoped to a session", () => {
 
 // --- extraction sanitizer (stubbed model, still no network) -----------------
 
-const SOURCES: ClaimSource[] = [
+const SOURCES: SearchResult[] = [
   { title: "Neon", url: "https://neon.com/pricing", content: "10 GB storage free" },
 ];
 
-function stubModel(payload: unknown): OpenAI {
-  return {
-    responses: {
-      create: async () => ({ output_text: JSON.stringify(payload) }),
-    },
-  } as unknown as OpenAI;
-}
-
 test("extraction drops invented URLs, empty fields and duplicates", async () => {
-  const extracted = await extractClaims(
-    stubModel({
+  const { claims: extracted } = await extractClaims(
+    stubLlm({
       claims: [
         {
           subject: "Neon free tier",
@@ -224,7 +209,6 @@ test("extraction drops invented URLs, empty fields and duplicates", async () => 
         }, // duplicate -> dropped
       ],
     }),
-    "stub-model",
     "Neon gives 10 GB free.",
     SOURCES
   );
@@ -239,9 +223,8 @@ test("extraction drops invented URLs, empty fields and duplicates", async () => 
 });
 
 test("extraction returns empty for a model that finds no claims", async () => {
-  const extracted = await extractClaims(
-    stubModel({ claims: [] }),
-    "stub-model",
+  const { claims: extracted } = await extractClaims(
+    stubLlm({ claims: [] }),
     "I don't know.",
     SOURCES
   );
@@ -256,8 +239,8 @@ test("attribute uses the question's concept, not a sibling from the answer", asy
       content: "v26.13.1 Latest LTS",
     },
   ];
-  const extracted = await extractClaims(
-    stubModel({
+  const { claims: extracted } = await extractClaims(
+    stubLlm({
       claims: [
         {
           subject: "Node.js",
@@ -268,7 +251,6 @@ test("attribute uses the question's concept, not a sibling from the answer", asy
         },
       ],
     }),
-    "stub-model",
     "v26.13.1 is the latest LTS.",
     sources,
     "What is the latest stable Node.js version?"
@@ -278,26 +260,26 @@ test("attribute uses the question's concept, not a sibling from the answer", asy
 });
 
 test("extraction is given the user's question so attributes stay grounded", async () => {
-  let capturedInput = "";
-  let capturedInstructions = "";
-  const capturing = {
-    responses: {
-      create: async (params: { input: string; instructions: string }) => {
-        capturedInput = String(params.input);
-        capturedInstructions = String(params.instructions);
-        return { output_text: JSON.stringify({ claims: [] }) };
-      },
+  let captured: StructuredRequest | undefined;
+  const capturing: Llm = {
+    structured: async <T>(request: StructuredRequest) => {
+      captured = request;
+      return { data: { claims: [] } as T, usage: NO_USAGE };
     },
-  } as unknown as OpenAI;
+    turn: async () => {
+      throw new Error("claim extraction does not run a tool loop");
+    },
+  };
 
   await extractClaims(
     capturing,
-    "stub-model",
     "v26.13.1 is the latest LTS.",
     SOURCES,
     "What is the latest stable Node.js version?"
   );
 
-  assert.match(capturedInput, /latest stable Node\.js version/);
-  assert.match(capturedInstructions, /do not substitute/i);
+  assert.ok(captured);
+  assert.match(captured.input, /latest stable Node\.js version/);
+  assert.match(captured.input, /v26\.13\.1 is the latest LTS/);
+  assert.match(captured.input, /neon\.com\/pricing/);
 });

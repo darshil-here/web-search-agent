@@ -1,5 +1,3 @@
-// db.ts
-//
 // Two memories, not one:
 //   turns  — what was said, when, in which session. Raw chat history.
 //   claims — the factual claims those answers made, with validity intervals.
@@ -8,12 +6,21 @@
 //
 // Two time columns on turns, on purpose:
 //   created_at  UTC ISO-8601, exact instant, used for ordering.
-//   local_date  YYYY-MM-DD in USER_TZ, used for "what did I ask on 3 November".
-// Comparing local dates against UTC timestamps is how date recall silently
-// breaks by one day for five and a half hours out of every day in IST.
+//   local_date  YYYY-MM-DD in the user's timezone, used for "what did I ask on
+//               3 November". Comparing local dates against UTC timestamps is how
+//               date recall silently breaks by one day for five and a half hours
+//               out of every day in IST.
 import Database from "better-sqlite3";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import { localDateInTz } from "./dates.js";
+
+/** Which conversation is being read and written, and in which timezone. */
+export type SessionContext = {
+  db: Database.Database;
+  sessionId: string;
+  timeZone: string;
+};
 
 export type Role = "user" | "assistant";
 
@@ -26,13 +33,7 @@ export type Turn = {
   localDate: string;
 };
 
-export type NewTurn = {
-  sessionId: string;
-  role: Role;
-  content: string;
-  createdAt: string;
-  localDate: string;
-};
+export type NewTurn = Omit<Turn, "id">;
 
 export type Claim = {
   id: number;
@@ -49,22 +50,18 @@ export type Claim = {
   supersededBy: number | null;
 };
 
-export type NewClaim = {
-  sessionId: string;
-  subject: string;
-  attribute: string;
-  value: string;
-  url: string | null;
-  quote: string | null;
-  observedAt: string;
-  localDate: string;
+export type NewClaim = Omit<
+  Claim,
+  "id" | "validFrom" | "validUntil" | "supersededBy"
+> & {
   /** Defaults to localDate when not supplied by an explicit source date. */
   validFrom?: string;
 };
 
 export type VerificationResult = "changed" | "unchanged" | "not_found";
 
-export type NewVerification = {
+export type Verification = {
+  id: number;
   sessionId: string;
   claimId: number;
   checkedAt: string;
@@ -74,7 +71,7 @@ export type NewVerification = {
   url: string | null;
 };
 
-export type Verification = NewVerification & { id: number };
+export type NewVerification = Omit<Verification, "id">;
 
 const SCHEMA_VERSION = 3;
 
@@ -94,8 +91,6 @@ const MIGRATIONS: Record<number, string> = {
   // A claim is an answer's checkable fact, versioned by validity interval.
   // We never overwrite a value: a new observation closes the old row
   // (valid_until, superseded_by) and inserts a new one. That chain is the diff.
-  // local_date exists for the same reason turns have it: "on 3 November" must
-  // not be wrong for the 5.5 hours a day UTC and IST disagree.
   2: `
     CREATE TABLE claims (
       id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -133,11 +128,7 @@ const MIGRATIONS: Record<number, string> = {
   `,
 };
 
-export function defaultDbPath(): string {
-  return process.env.DB_PATH ?? "data/agent.db";
-}
-
-export function openDb(path: string = defaultDbPath()): Database.Database {
+export function openDb(path: string): Database.Database {
   if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
 
   const db = new Database(path);
@@ -196,6 +187,26 @@ export function saveTurn(db: Database.Database, turn: NewTurn): Turn {
     );
 
   return { id: Number(info.lastInsertRowid), ...turn };
+}
+
+/**
+ * Append one message to the session, stamping both time columns from the same
+ * instant. Callers pass the turn's `now` so a message's local date cannot land
+ * on a different day from the question it belongs to.
+ */
+export function appendTurn(
+  ctx: SessionContext,
+  role: Role,
+  content: string,
+  now: Date
+): Turn {
+  return saveTurn(ctx.db, {
+    sessionId: ctx.sessionId,
+    role,
+    content,
+    createdAt: now.toISOString(),
+    localDate: localDateInTz(now, ctx.timeZone),
+  });
 }
 
 // Oldest first, so the caller can join them into one block without reversing.
@@ -275,18 +286,16 @@ function toClaim(row: ClaimRow): Claim {
   };
 }
 
-export function saveClaim(
-  db: Database.Database,
-  claim: NewClaim
-): Claim {
-  const info = db
+export function saveClaim(db: Database.Database, claim: NewClaim): Claim {
+  const row = db
     .prepare(
       `INSERT INTO claims
         (session_id, subject, attribute, value, url, quote,
          observed_at, local_date, valid_from)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       RETURNING *`
     )
-    .run(
+    .get(
       claim.sessionId,
       claim.subject,
       claim.attribute,
@@ -296,11 +305,8 @@ export function saveClaim(
       claim.observedAt,
       claim.localDate,
       claim.validFrom ?? claim.localDate
-    );
+    ) as ClaimRow;
 
-  const row = db
-    .prepare(`SELECT * FROM claims WHERE id = ?`)
-    .get(Number(info.lastInsertRowid)) as ClaimRow;
   return toClaim(row);
 }
 
@@ -410,26 +416,24 @@ function toVerification(row: VerificationRow): Verification {
 
 export function saveVerification(
   db: Database.Database,
-  v: NewVerification
+  verification: NewVerification
 ): Verification {
-  const info = db
+  const row = db
     .prepare(
       `INSERT INTO verifications
         (session_id, claim_id, checked_at, local_date, result, new_value, url)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       RETURNING *`
     )
-    .run(
-      v.sessionId,
-      v.claimId,
-      v.checkedAt,
-      v.localDate,
-      v.result,
-      v.newValue,
-      v.url
-    );
-  const row = db
-    .prepare(`SELECT * FROM verifications WHERE id = ?`)
-    .get(Number(info.lastInsertRowid)) as VerificationRow;
+    .get(
+      verification.sessionId,
+      verification.claimId,
+      verification.checkedAt,
+      verification.localDate,
+      verification.result,
+      verification.newValue,
+      verification.url
+    ) as VerificationRow;
   return toVerification(row);
 }
 
@@ -446,20 +450,4 @@ export function verificationsForClaim(
       )
       .all(sessionId, claimId) as VerificationRow[]
   ).map(toVerification);
-}
-
-export function recentVerifications(
-  db: Database.Database,
-  sessionId: string,
-  limit: number
-): Verification[] {
-  return (
-    db
-      .prepare(
-        `SELECT * FROM verifications WHERE session_id = ? ORDER BY id DESC LIMIT ?`
-      )
-      .all(sessionId, limit) as VerificationRow[]
-  )
-    .map(toVerification)
-    .reverse();
 }
