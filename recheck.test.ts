@@ -18,6 +18,7 @@ import {
   extractFreshValues,
   buildDiff,
   writeBack,
+  recheck,
 } from "./recheck.js";
 
 function c(
@@ -193,5 +194,83 @@ test("unchanged writes only a verification; not_found leaves the claim open", ()
   assert.equal(result.verifications, 2);
   assert.equal(openClaim(db, "s", "A", "price")?.value, "$10");
   assert.equal(openClaim(db, "s", "B", "price")?.value, "$20");
+  db.close();
+});
+
+// --- orchestration ----------------------------------------------------------
+
+function stubFull(payload: unknown): OpenAI {
+  return {
+    responses: {
+      create: async () => ({ output_text: JSON.stringify(payload), output: [] }),
+    },
+  } as unknown as OpenAI;
+}
+
+test("recheck falls back to open claims when the named date is empty", async () => {
+  const db = freshDb();
+  const claim = recordClaims(
+    db, "s", [extracted("Node.js", "latest LTS release", "v26.13.1")], NOW, IST
+  ).claims[0];
+  const searches: string[] = [];
+
+  const report = await recheck({
+    ctx: { db, sessionId: "s", timeZone: IST },
+    intent: { date: "2026-11-03", phrase: "still correct" },
+    userText: "What did I ask on 3 November? Is your answer still correct today?",
+    now: NOW,
+    openai: stubFull({
+      results: [
+        {
+          claimId: claim.id,
+          value: "v26.13.1",
+          url: "https://nodejs.org/en/download",
+          quote: "v26.13.1 Latest LTS",
+          status: "unchanged",
+        },
+      ],
+    }),
+    model: "stub",
+    instructions: "You are a research assistant.",
+    search: async (q) => {
+      searches.push(q);
+      return [
+        {
+          title: "Node",
+          url: "https://nodejs.org/en/download",
+          content: "v26.13.1 Latest LTS",
+        },
+      ];
+    },
+  });
+
+  assert.equal(report.claimsChecked, 1);
+  assert.equal(searches.length, 1);
+  assert.equal(report.fresh[0].status, "unchanged");
+  assert.equal(report.writeBack.verifications, 1);
+  db.close();
+});
+
+test("recheck abstains with zero searches when there is nothing to check", async () => {
+  const db = freshDb();
+  let called = false;
+
+  const report = await recheck({
+    ctx: { db, sessionId: "s", timeZone: IST },
+    intent: { date: "2026-11-03", phrase: "changed since" },
+    userText: "Has anything changed since 3 November?",
+    now: NOW,
+    openai: stubFull({ results: [] }),
+    model: "stub",
+    instructions: "You are a research assistant.",
+    search: async () => {
+      called = true;
+      return [];
+    },
+  });
+
+  assert.equal(called, false);
+  assert.equal(report.claimsChecked, 0);
+  assert.match(report.answer, /no prior claim/i);
   db.close();
 });

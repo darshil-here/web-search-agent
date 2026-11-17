@@ -10,8 +10,10 @@ import type Database from "better-sqlite3";
 import type { Claim } from "./db.js";
 import type { ClaimSource } from "./claims.js";
 import { recordClaims } from "./claims.js";
-import { saveVerification } from "./db.js";
+import { claimsForDate, openClaims, saveVerification } from "./db.js";
 import { localDateInTz } from "./dates.js";
+import type { RecheckIntent } from "./detect.js";
+import type { NotebookContext } from "./notebook.js";
 
 export type FreshStatus = "changed" | "unchanged" | "not_found";
 
@@ -201,4 +203,146 @@ export function writeBack(
   }
 
   return { inserted, superseded, verifications };
+}
+
+export type RecheckReport = {
+  answer: string;
+  intent: RecheckIntent;
+  queries: string[];
+  claimsChecked: number;
+  failedSearches: number;
+  writeBack: { inserted: number; superseded: number; verifications: number };
+  usedSearch: boolean;
+  fresh: FreshValue[];
+};
+
+export async function recheck(args: {
+  ctx: NotebookContext;
+  intent: RecheckIntent;
+  userText: string;
+  now: Date;
+  openai: OpenAI;
+  model: string;
+  instructions: string;
+  search: (q: string) => Promise<ClaimSource[]>;
+}): Promise<RecheckReport> {
+  const { ctx, intent, now, openai, model, instructions, search } = args;
+  const dated = claimsForDate(ctx.db, ctx.sessionId, intent.date);
+  const claims = dated.length > 0 ? dated : openClaims(ctx.db, ctx.sessionId);
+  const queries = buildQueries(claims);
+
+  if (claims.length === 0 || queries.length === 0) {
+    return {
+      answer: `I have no prior claim recorded for ${intent.date}, so there is nothing to re-check.`,
+      intent,
+      queries: [],
+      claimsChecked: 0,
+      failedSearches: 0,
+      writeBack: { inserted: 0, superseded: 0, verifications: 0 },
+      usedSearch: false,
+      fresh: [],
+    };
+  }
+
+  // Bound the fan-out: a 20-subject question must not fire 20 searches.
+  const configured = Number(process.env.MAX_RECHECK_SEARCHES ?? 8);
+  const cap = Number.isInteger(configured) && configured > 0 ? configured : 8;
+  const cappedQueries = queries.slice(0, cap);
+
+  const settled = await Promise.all(
+    cappedQueries.map(async (q) => {
+      try {
+        return { ok: true as const, results: await search(q) };
+      } catch {
+        return { ok: false as const, results: [] as ClaimSource[] };
+      }
+    })
+  );
+  const sources: ClaimSource[] = [];
+  const seen = new Set<string>();
+  let failedSearches = 0;
+  for (const outcome of settled) {
+    if (!outcome.ok) {
+      failedSearches++;
+      continue;
+    }
+    for (const result of outcome.results) {
+      if (seen.has(result.url)) continue;
+      seen.add(result.url);
+      sources.push(result);
+    }
+  }
+
+  let fresh: FreshValue[];
+  try {
+    fresh = await extractFreshValues(openai, model, claims, sources);
+  } catch {
+    fresh = claims.map((c) => ({
+      claimId: c.id,
+      value: "",
+      url: null,
+      quote: null,
+      status: "not_found" as const,
+    }));
+  }
+
+  const { text: diff } = buildDiff(claims, fresh);
+
+  if (failedSearches === cappedQueries.length) {
+    return {
+      answer: "I could not complete the re-check: every web search failed.",
+      intent,
+      queries: cappedQueries,
+      claimsChecked: claims.length,
+      failedSearches,
+      writeBack: { inserted: 0, superseded: 0, verifications: 0 },
+      usedSearch: false,
+      fresh,
+    };
+  }
+
+  const response = await openai.responses.create({
+    model,
+    instructions,
+    input: [
+      { role: "developer", content: diff },
+      { role: "user", content: args.userText },
+    ],
+    tools: [
+      {
+        type: "function",
+        name: "web_search",
+        description: "Search the web. Use only if the diff leaves something unverified.",
+        parameters: {
+          type: "object",
+          properties: { query: { type: "string" } },
+          required: ["query"],
+          additionalProperties: false,
+        },
+        strict: false,
+      },
+    ],
+  });
+
+  // Best-effort, same principle as claims.ts: a ledger failure is traced in
+  // the report, never thrown to the user.
+  let writeBackResult = { inserted: 0, superseded: 0, verifications: 0 };
+  try {
+    writeBackResult = writeBack(
+      ctx.db, ctx.sessionId, claims, fresh, now, ctx.timeZone
+    );
+  } catch {
+    // The answer stands; the trace records zero write-backs.
+  }
+
+  return {
+    answer: response.output_text,
+    intent,
+    queries: cappedQueries,
+    claimsChecked: claims.length,
+    failedSearches,
+    writeBack: writeBackResult,
+    usedSearch: response.output.some((o) => o.type === "function_call"),
+    fresh,
+  };
 }
