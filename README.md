@@ -20,6 +20,8 @@ question can also be passed as an argument: `npm start -- "what is 17 times 23"`
 
 - `src/` — the agent, split by responsibility (see `DESIGN.md`).
 - `test/` — unit and pipeline tests; `npm test` discovers them.
+- `eval/` — the acceptance set: `cases.ts` (brief + LongMemEval + failure
+  regressions), the offline/live runners, and gitignored reports.
 - `scripts/` — `db-check.ts`, a schema smoke check against a throwaway database.
 - `data/` and `traces/` — runtime output, gitignored.
 
@@ -89,7 +91,23 @@ npm test           # date, model, ledger, re-check and trace tests, no network
 npm run typecheck  # tsc --noEmit
 npm run db:check   # exercise the schema against data/db-check.db
 npm run db:reset   # delete data/agent.db
+npm run eval       # 18 offline acceptance cases, no network
+npm run eval:live  # same cases through the real CLI, answers judged by the model
 ```
+
+## Eval set
+
+`eval/cases.ts` holds 18 cases from three sources: the three examples in the
+brief, the five LongMemEval categories, and one regression per logged failure.
+Each case has a deterministic probe of the real pipeline (with stubbed model
+and search) and a rubric describing a good answer.
+
+`npm run eval` runs the probes — free and repeatable, and also part of `npm test`.
+`npm run eval:live` runs each case through the real CLI in a throwaway session,
+then asks the model to judge the answer against its rubric; the report is written
+to `eval/results/`. A nonzero exit means at least one case failed. The four
+failures still expected in the live sweep are F-002, F-003, F-005 and F-006 —
+the open grounding, citation, scope and recency failures in `FAILURES.md`.
 
 ## Traces
 
