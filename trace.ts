@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { format } from "node:util";
+import type { RecheckReport } from "./recheck.js";
 
 const TRACES_DIR = "traces";
 
@@ -127,6 +128,7 @@ export class Tracer {
   private finalInfo: Final | undefined;
   private recallInfo: Recall | undefined;
   private claimInfo: ClaimEvent | undefined;
+  private recheckInfo: RecheckReport | undefined;
   private flushedPath: string | undefined;
 
   constructor(question: string) {
@@ -201,6 +203,15 @@ export class Tracer {
       type: "claims",
       ts: new Date().toISOString(),
       ...info,
+    });
+  }
+
+  recheck(report: RecheckReport): void {
+    this.recheckInfo = report;
+    this.events.push({
+      type: "recheck",
+      ts: new Date().toISOString(),
+      ...report,
     });
   }
 
@@ -300,6 +311,7 @@ export class Tracer {
       `steps: ${this.llmCalls.length}`,
       `tool_calls: ${this.toolCalls.length}`,
       `claims: ${this.claimInfo?.extracted ?? 0}`,
+      `recheck_claims: ${this.recheckInfo?.claimsChecked ?? 0}`,
       "tokens:",
       `  prompt: ${totals.prompt}`,
       `  completion: ${totals.completion}`,
@@ -380,6 +392,29 @@ export class Tracer {
         }
         lines.push("");
       }
+    }
+
+    if (this.recheckInfo) {
+      const r = this.recheckInfo;
+      lines.push(
+        "",
+        "## Re-check",
+        "",
+        `Date queried: ${r.intent.date} | phrase: ${r.intent.phrase}`,
+        "",
+        "| claims checked | queries | failed searches | used search | inserted | superseded | verifications |",
+        "|---------------:|--------:|----------------:|:------------|---------:|------------:|--------------:|",
+        `| ${r.claimsChecked} | ${r.queries.length} | ${r.failedSearches} | ` +
+          `${r.usedSearch} | ${r.writeBack.inserted} | ${r.writeBack.superseded} | ` +
+          `${r.writeBack.verifications} |`,
+        ""
+      );
+      for (const f of r.fresh) {
+        lines.push(
+          `- claim ${f.claimId}: ${f.status} — ${f.value || "no value"} ${f.url ?? ""}`
+        );
+      }
+      lines.push("");
     }
 
     if (this.finalInfo?.stopReason === "budget") {

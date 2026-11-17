@@ -13,6 +13,7 @@ import {
   type Claim,
 } from "./db.js";
 import { recordClaims } from "./claims.js";
+import { Tracer } from "./trace.js";
 import {
   buildQueries,
   extractFreshValues,
@@ -273,4 +274,28 @@ test("recheck abstains with zero searches when there is nothing to check", async
   assert.equal(report.claimsChecked, 0);
   assert.match(report.answer, /no prior claim/i);
   db.close();
+});
+
+test("tracer records a recheck event and renders its section", () => {
+  const t = new Tracer("test");
+  t.recheck({
+    answer: "no change",
+    intent: { date: "2026-11-03", phrase: "still correct" },
+    queries: ["Node.js latest LTS release"],
+    claimsChecked: 1,
+    failedSearches: 0,
+    writeBack: { inserted: 0, superseded: 0, verifications: 1 },
+    usedSearch: false,
+    fresh: [
+      {
+        claimId: 1,
+        value: "v26.13.1",
+        url: null,
+        quote: null,
+        status: "unchanged",
+      },
+    ],
+  });
+  const path = t.flush();
+  assert.ok(path.endsWith(".md"));
 });
