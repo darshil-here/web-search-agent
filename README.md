@@ -92,9 +92,13 @@ domain, `MAX_PAGE_FETCHES` total), publication dates are read from the text, and
 a critic rewrites the answer so every factual claim carries an inline URL from
 the retrieved set. Unsupported claims are marked "not stated in sources".
 Simpler answers skip the fetch and critic, but every sourced answer still gets
-a statement of whether the sources showed a publication date. A deterministic
-scope guard then removes sentences volunteering concepts the user did not ask
-about. Both phases appear in the trace.
+a statement of whether the sources showed a publication date. Tavily's
+publication dates rank search results before the model sees them, so a current
+source appears ahead of a launch-era one. Two deterministic guards finish the
+answer: `calibration.ts` rewrites absolute longevity claims no source states
+into "sources do not state" wording, and `scope.ts` removes sentences
+volunteering concepts the user did not ask about. All phases appear in the
+trace.
 
 ## Commands
 

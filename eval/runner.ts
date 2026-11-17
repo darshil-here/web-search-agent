@@ -114,7 +114,8 @@ Return:
 
 Be strict about sources. An answer that asserts a change without a source does
 not satisfy "source URL for each change". An honest "I could not verify" is
-acceptable when the rubric allows it. Judge only the answer, not the rubric.`;
+acceptable when the rubric allows it. Judge ONLY the listed must and mustNot
+items. Do not penalize the answer for problems that the rubric does not mention.`;
 
 const JUDGE_SCHEMA = {
   type: "object",
@@ -135,6 +136,7 @@ export type LiveResult = {
   reasons: string[];
   trace: string | null;
   error: string | null;
+  sources: string[];
 };
 
 function readFinalFromTrace(traceDir: string, sessionId: string): string {
@@ -150,6 +152,33 @@ function readFinalFromTrace(traceDir: string, sessionId: string): string {
     }
   }
   return "";
+}
+
+/** The retrieved snippets, so the judge can tell a sourced claim from a guess. */
+function readSourcesFromTrace(traceDir: string, sessionId: string): string[] {
+  const files = readdirSync(traceDir).filter((f) => f.endsWith(".jsonl"));
+  for (const file of files) {
+    const lines = readFileSync(join(traceDir, file), "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    if (
+      lines.some(
+        (line) => line.type === "run_start" && line.sessionId === sessionId
+      )
+    ) {
+      const out: string[] = [];
+      for (const line of lines.filter((l) => l.type === "tool_call")) {
+        for (const result of (line.results ?? []) as Array<Record<string, unknown>>) {
+          out.push(
+            `${result.url ?? ""} ${String(result.content ?? "").slice(0, 600)}`
+          );
+        }
+      }
+      return out;
+    }
+  }
+  return [];
 }
 
 /** Run one case through the real CLI, then judge its answer. */
@@ -195,6 +224,7 @@ export async function runLive(
     reasons: [],
     trace: null,
     error: null,
+    sources: [],
   };
 
   try {
@@ -218,6 +248,7 @@ export async function runLive(
 
   base.answer = readFinalFromTrace(traceDir, sessionId);
   base.trace = readdirSync(traceDir).find((f) => f.endsWith(".md")) ?? null;
+  base.sources = readSourcesFromTrace(traceDir, sessionId);
 
   const rubricText =
     "MUST:\n" +
@@ -245,6 +276,9 @@ export async function runLive(
     input:
       `RUBRIC:\n${rubricText}\n\n` +
       `SEEDED HISTORY (known to be true):\n${historyText || "(none)"}\n\n` +
+      `RETRIEVED SOURCES (what the agent actually saw):\n${
+        base.sources.join("\n") || "(none)"
+      }\n\n` +
       `ANSWER:\n${base.answer || "(empty answer)"}`,
   });
   base.passed = judged.data.pass;

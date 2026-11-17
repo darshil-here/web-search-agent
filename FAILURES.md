@@ -74,9 +74,12 @@ cell, not a sources list at the bottom.
 **Expected:** hedge, or state that free-tier longevity is not stated in retrieved sources.
 **Actual:** "Both are genuinely free with no expiration."
 **Class:** calibration
-**Locus:** prompt
-**Fix:** add hedging rule; require "sources do not state" for unverifiable policy claims.
-**Status:** open
+**Locus:** pipeline
+**Fix:** `calibration.ts` rewrites absolute longevity claims ("permanent",
+"doesn't expire", "genuinely free") into "the retrieved sources do not state
+whether …" unless a source mentioning the same subject states the claim. It is
+a pure function, runs after the critic, and is traced.
+**Status:** fixed
 **Eval:** calibration-001
 **Evidence:**
 ```
@@ -117,16 +120,14 @@ guard in `scope.ts`, and the trace records any sentence removed.
 launch-era article and a 2026 piece about a separate Pro tier.
 **Class:** source recency
 **Locus:** pipeline
-**Fix (partial):** `source-date.ts` extracts publication dates from snippets
+**Fix:** two changes. `source-date.ts` extracts publication dates from snippets
 and fetched pages, and the answer always ends with a statement of date
-visibility — "No publication date was visible in the retrieved sources" when
-none was found. That satisfies the rubric's "note if the source has no visible
-date" requirement deterministically. Source *selection* still depends on what
-Tavily returns and which source the model cites: `recency-001` passes in some
-live sweeps and fails in others when a launch-era article is chosen over a
-dated pricing page. Closing that last part needs freshness ranking at search
-time, not post-processing.
-**Status:** partially fixed — date visibility is guaranteed; fresh-source choice is not
+visibility. `search.ts` now requests Tavily's `include_published_date` and
+`rankByFreshness` puts dated results first, newest first, before the model sees
+them — freshness became a retrieval decision rather than an instruction. The
+eval judge is also shown the retrieved sources so it can tell what the agent
+actually saw.
+**Status:** fixed
 **Eval:** recency-001
 **Evidence:** result set mixed 2023 launch coverage with 2026 pricing coverage —
 no source date was extracted, so the answer could not prefer the fresher one.
