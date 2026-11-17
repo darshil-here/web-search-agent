@@ -87,16 +87,21 @@ of workloads.
 **Class:** scope
 **Locus:** prompt
 **Fix:** "Answer the question asked. Mention adjacent releases only if the user asks."
-**Status:** prompt fixed, unenforced
+**Status:** open — rule present in the prompt, unenforced
 **Eval:** scope-001
 **Evidence:**
 ```
 - **Latest LTS:** v26.13.1 — recommended for most users and production environments
 - **Latest Alpha:** v27.0.0-alpha.0.1.0 — experimental/early release, not for production
 ```
-Not reproduced on `2026-11-17`: the same question returned only the LTS line.
-The rule is now in the system prompt verbatim; nothing enforces it, so the
-status is "prompt fixed", not "fixed".
+An early run on `2026-11-17` returned only the LTS line, but a later run the
+same day reproduced it. `traces/2026-11-17-151237-what-is-the-latest-stable-node-js-versio.md`:
+```
+The latest stable Node.js release is **v26.13.1 (LTS)**. The official Node.js
+releases page lists it as the latest LTS; the 27.x line is currently Alpha.
+```
+The rule is in the system prompt verbatim; nothing enforces it, so this stays
+open rather than "prompt fixed". Scope-001 is the eval case that guards it.
 
 ## F-006 — Cited a source without checking its recency
 **Input:** "What is the current price of the ChatGPT Plus subscription?"

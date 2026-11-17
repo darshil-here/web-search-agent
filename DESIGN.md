@@ -35,7 +35,7 @@ The brief's examples are temporal questions, and the ledger plus re-check path n
 - **Claim recall in the notebook.** Inject open claims (current beliefs) alongside turn text so follow-up questions can refer to facts, not just to prose. The re-check path reads claims, but ordinary conversation still only sees turn text.
 - **Wider detection.** The detector covers the phrasing in the brief and close variants. An LLM classifier could catch more, at the cost of a call on every turn — measure first.
 - **Page fetching + grounding critic.** Tavily snippets cap quality. Fetch the top pages per vendor, drop table cells no source supports, require a URL per claim, extract source dates and prefer the freshest, and add a "sources do not state" hedge for unverifiable policy claims (closes the open F-002/F-003/F-004/F-006).
-- **Eval set.** Build scripted acceptance tests from the three brief examples, the LongMemEval task taxonomy (extraction, multi-session reasoning, temporal reasoning, knowledge updates, abstention), and the nine logged failures. Then measure every change instead of asserting it.
+- **Eval set.** Build scripted acceptance tests from the three brief examples, the LongMemEval task taxonomy (extraction, multi-session reasoning, temporal reasoning, knowledge updates, abstention), and the ten logged failures. Then measure every change instead of asserting it.
 - **Robustness.** Guard `reasoning: { effort: "low" }` against non-reasoning model slugs and commit a curated `traces/` subset, since `FAILURES.md` currently cites gitignored paths.
 
 ---
