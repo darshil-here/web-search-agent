@@ -4,6 +4,12 @@
 
 export type SearchResult = { title: string; url: string; content: string };
 
+/** A search hit after page text and a publication date have been attached. */
+export type EnrichedSource = SearchResult & {
+  pageText: string | null;
+  publishedAt: string | null;
+};
+
 const ENDPOINT = "https://api.tavily.com/search";
 
 export function createSearch(

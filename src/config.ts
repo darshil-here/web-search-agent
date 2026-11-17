@@ -13,6 +13,7 @@ export type Config = {
   tracesDir: string;
   maxSteps: number;
   maxRecheckSearches: number;
+  maxPageFetches: number;
 };
 
 function requireEnv(env: NodeJS.ProcessEnv, name: string): string {
@@ -47,6 +48,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     tracesDir: env.TRACES_DIR ?? "traces",
     maxSteps: positiveInt(env, "MAX_STEPS", 5),
     maxRecheckSearches: positiveInt(env, "MAX_RECHECK_SEARCHES", 8),
+    maxPageFetches: positiveInt(env, "MAX_PAGE_FETCHES", 6),
   };
 
   // Fail before the first turn, not halfway through an answer.

@@ -22,6 +22,7 @@ test("the required keys are read and the rest default", () => {
   assert.equal(config.tracesDir, "traces");
   assert.equal(config.maxSteps, 5);
   assert.equal(config.maxRecheckSearches, 8);
+  assert.equal(config.maxPageFetches, 6);
 });
 
 test("every optional key overrides its default", () => {
@@ -33,6 +34,7 @@ test("every optional key overrides its default", () => {
     TRACES_DIR: "tmp/traces",
     MAX_STEPS: "9",
     MAX_RECHECK_SEARCHES: "2",
+    MAX_PAGE_FETCHES: "3",
   });
 
   assert.equal(config.sessionId, "session-1");
@@ -41,6 +43,7 @@ test("every optional key overrides its default", () => {
   assert.equal(config.tracesDir, "tmp/traces");
   assert.equal(config.maxSteps, 9);
   assert.equal(config.maxRecheckSearches, 2);
+  assert.equal(config.maxPageFetches, 3);
 });
 
 test("a missing required key fails at startup", () => {
