@@ -62,7 +62,21 @@ export type NewClaim = {
   validFrom?: string;
 };
 
-const SCHEMA_VERSION = 2;
+export type VerificationResult = "changed" | "unchanged" | "not_found";
+
+export type NewVerification = {
+  sessionId: string;
+  claimId: number;
+  checkedAt: string;
+  localDate: string;
+  result: VerificationResult;
+  newValue: string | null;
+  url: string | null;
+};
+
+export type Verification = NewVerification & { id: number };
+
+const SCHEMA_VERSION = 3;
 
 const MIGRATIONS: Record<number, string> = {
   1: `
@@ -100,6 +114,22 @@ const MIGRATIONS: Record<number, string> = {
     CREATE INDEX claims_open      ON claims(session_id, subject, attribute, valid_until);
     CREATE INDEX claims_date      ON claims(session_id, local_date);
     CREATE INDEX claims_subject   ON claims(session_id, subject, id);
+  `,
+  // A verification is the audit trail of a re-check. It exists so "unchanged"
+  // is not lost: the claim ledger is idempotent, but knowing a fact was tested
+  // today is a different fact from never having tested it.
+  3: `
+    CREATE TABLE verifications (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id  TEXT NOT NULL,
+      claim_id    INTEGER NOT NULL REFERENCES claims(id),
+      checked_at  TEXT NOT NULL,
+      local_date  TEXT NOT NULL,
+      result      TEXT NOT NULL CHECK (result IN ('changed','unchanged','not_found')),
+      new_value   TEXT,
+      url         TEXT
+    );
+    CREATE INDEX verifications_claim ON verifications(session_id, claim_id, id);
   `,
 };
 
@@ -350,4 +380,86 @@ export function openClaims(
       )
       .all(sessionId) as ClaimRow[]
   ).map(toClaim);
+}
+
+// --- Verification audit trail ----------------------------------------------
+
+type VerificationRow = {
+  id: number;
+  session_id: string;
+  claim_id: number;
+  checked_at: string;
+  local_date: string;
+  result: VerificationResult;
+  new_value: string | null;
+  url: string | null;
+};
+
+function toVerification(row: VerificationRow): Verification {
+  return {
+    id: row.id,
+    sessionId: row.session_id,
+    claimId: row.claim_id,
+    checkedAt: row.checked_at,
+    localDate: row.local_date,
+    result: row.result,
+    newValue: row.new_value,
+    url: row.url,
+  };
+}
+
+export function saveVerification(
+  db: Database.Database,
+  v: NewVerification
+): Verification {
+  const info = db
+    .prepare(
+      `INSERT INTO verifications
+        (session_id, claim_id, checked_at, local_date, result, new_value, url)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    )
+    .run(
+      v.sessionId,
+      v.claimId,
+      v.checkedAt,
+      v.localDate,
+      v.result,
+      v.newValue,
+      v.url
+    );
+  const row = db
+    .prepare(`SELECT * FROM verifications WHERE id = ?`)
+    .get(Number(info.lastInsertRowid)) as VerificationRow;
+  return toVerification(row);
+}
+
+export function verificationsForClaim(
+  db: Database.Database,
+  sessionId: string,
+  claimId: number
+): Verification[] {
+  return (
+    db
+      .prepare(
+        `SELECT * FROM verifications
+         WHERE session_id = ? AND claim_id = ? ORDER BY id ASC`
+      )
+      .all(sessionId, claimId) as VerificationRow[]
+  ).map(toVerification);
+}
+
+export function recentVerifications(
+  db: Database.Database,
+  sessionId: string,
+  limit: number
+): Verification[] {
+  return (
+    db
+      .prepare(
+        `SELECT * FROM verifications WHERE session_id = ? ORDER BY id DESC LIMIT ?`
+      )
+      .all(sessionId, limit) as VerificationRow[]
+  )
+    .map(toVerification)
+    .reverse();
 }

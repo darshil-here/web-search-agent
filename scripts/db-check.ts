@@ -105,8 +105,8 @@ check("data survives closing and reopening the file", () => {
   assert.equal(recentTurns(db, "s1", 10).length, 3);
 });
 
-check("schema is v2 and the claim ledger is present", () => {
-  assert.equal(db.pragma("user_version", { simple: true }), 2);
+check("schema is v3 and the claim ledger is present", () => {
+  assert.equal(db.pragma("user_version", { simple: true }), 3);
 });
 
 check("a claim is stored with a local date and no end date", () => {

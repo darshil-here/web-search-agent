@@ -12,6 +12,9 @@ import {
   openClaim,
   openClaims,
   openDb,
+  recentVerifications,
+  saveVerification,
+  verificationsForClaim,
 } from "./db.js";
 import {
   extractClaims,
@@ -39,14 +42,35 @@ function claim(
 
 // --- record / reconcile -----------------------------------------------------
 
-test("a fresh DB opens at schema v2 with a claims table", () => {
+test("a fresh DB opens at schema v3 with claims and verification tables", () => {
   const db = freshDb();
   const tables = db
     .prepare(`SELECT name FROM sqlite_master WHERE type = 'table'`)
     .all()
     .map((r) => (r as { name: string }).name);
   assert.ok(tables.includes("claims"));
-  assert.equal(db.pragma("user_version", { simple: true }), 2);
+  assert.equal(db.pragma("user_version", { simple: true }), 3);
+  assert.ok(tables.includes("verifications"));
+  db.close();
+});
+
+test("a verification records a check in the user's timezone", () => {
+  const db = freshDb();
+  const c = recordClaims(
+    db, "s", [claim("Neon free tier", "storage", "10 GB")], NOW, IST
+  ).claims[0];
+  const v = saveVerification(db, {
+    sessionId: "s",
+    claimId: c.id,
+    checkedAt: NOW.toISOString(),
+    localDate: "2026-11-17",
+    result: "unchanged",
+    newValue: null,
+    url: null,
+  });
+  assert.equal(v.result, "unchanged");
+  assert.equal(verificationsForClaim(db, "s", c.id).length, 1);
+  assert.equal(recentVerifications(db, "s", 10)[0].claimId, c.id);
   db.close();
 });
 
