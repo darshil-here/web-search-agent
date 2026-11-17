@@ -30,6 +30,11 @@ export type FreshValue = {
   url: string | null;
   quote: string | null;
   status: FreshStatus;
+  /** The concept the source actually describes, reported by extraction and
+   * checked against the recorded attribute in code. */
+  matchedAttribute?: string | null;
+  /** Set when the guard downgraded a result because the concepts differ. */
+  mismatch?: boolean;
 };
 
 export function buildQueries(claims: Claim[]): string[] {
@@ -43,12 +48,53 @@ export function buildQueries(claims: Claim[]): string[] {
   return out;
 }
 
+const normalizeAttribute = (s: string): string =>
+  s
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+/**
+ * A value is only evidence about the attribute it was recorded against. If a
+ * source describes a different concept, "unchanged" would be a false
+ * verification — the F-010 failure. Downgrade to not_found in code, so the
+ * discipline does not depend on the model remembering the prompt.
+ */
+export function enforceAttributeMatch(
+  claims: Claim[],
+  fresh: FreshValue[]
+): FreshValue[] {
+  const byId = new Map(claims.map((c) => [c.id, c]));
+  return fresh.map((value) => {
+    const claim = byId.get(value.claimId);
+    const matched = value.matchedAttribute;
+    if (!claim || !matched || !normalizeAttribute(matched)) return value;
+
+    const recorded = normalizeAttribute(claim.attribute);
+    const observed = normalizeAttribute(matched);
+    const same =
+      recorded === observed ||
+      recorded.includes(observed) ||
+      observed.includes(recorded);
+    if (same || value.status === "not_found") return value;
+
+    return { ...value, status: "not_found" as const, mismatch: true };
+  });
+}
+
 const EXTRACT_FRESH_INSTRUCTIONS = `You compare previously recorded claims against fresh search results.
 
 For each claim id, decide whether the current value is:
-- "unchanged" if the sources state the same value
-- "changed" if the sources state a different value
-- "not_found" if the sources do not state a current value
+- "unchanged" if the sources state the same value for the SAME attribute
+- "changed" if the sources state a different value for the SAME attribute
+- "not_found" if the sources do not state that attribute's current value
+
+Also set matchedAttribute to the exact concept the sources actually describe.
+Do not normalise between related concepts: "stable"/"current" and "LTS" are
+different attributes, as are "free tier" and "paid tier". If the sources
+describe a different attribute than the recorded one, set status to not_found
+and report what they did describe in matchedAttribute.
 
 Return one result per claim id given. Use only values stated in the sources.
 Use an exact source URL from the sources, or null. Never invent a URL.`;
@@ -66,8 +112,9 @@ const FRESH_SCHEMA = {
           url: { anyOf: [{ type: "string" }, { type: "null" }] },
           quote: { anyOf: [{ type: "string" }, { type: "null" }] },
           status: { type: "string", enum: ["changed", "unchanged", "not_found"] },
+          matchedAttribute: { anyOf: [{ type: "string" }, { type: "null" }] },
         },
-        required: ["claimId", "value", "url", "quote", "status"],
+        required: ["claimId", "value", "url", "quote", "status", "matchedAttribute"],
         additionalProperties: false,
       },
     },
@@ -132,7 +179,7 @@ export async function extractFreshValues(
   }
 
   // Every claim must appear in the diff, even when extraction omitted it.
-  return claims.map(
+  const complete = claims.map(
     (c) =>
       byId.get(c.id) ?? {
         claimId: c.id,
@@ -142,6 +189,7 @@ export async function extractFreshValues(
         status: "not_found" as const,
       }
   );
+  return enforceAttributeMatch(claims, complete);
 }
 
 export function buildDiff(
@@ -161,6 +209,12 @@ export function buildDiff(
     lines.push(`  recorded: ${claim.value} (observed ${claim.localDate})`);
     if (!value || value.status === "not_found") {
       lines.push(`  current: not found in fresh sources — status: not_found`);
+      if (value?.mismatch && value.matchedAttribute) {
+        lines.push(
+          `  mismatch: source describes "${value.matchedAttribute}", ` +
+            `not "${claim.attribute}" — do not treat this as a re-check`
+        );
+      }
     } else {
       lines.push(`  current: ${value.value} (${value.status})`);
       if (value.url) lines.push(`  source: ${value.url}`);
@@ -347,37 +401,73 @@ export async function recheck(args: {
     { role: "user", content: args.userText },
   ];
 
-  const answerStart = performance.now();
-  const response = await openai.responses.create({
-    model,
-    instructions,
-    input,
-    tools: [
-      {
-        type: "function",
-        name: "web_search",
-        description: "Search the web. Use only if the diff leaves something unverified.",
-        parameters: {
-          type: "object",
-          properties: { query: { type: "string" } },
-          required: ["query"],
-          additionalProperties: false,
-        },
-        strict: false,
+  const tools: OpenAI.Responses.FunctionTool[] = [
+    {
+      type: "function",
+      name: "web_search",
+      description: "Search the web. Use only if the diff leaves something unverified.",
+      parameters: {
+        type: "object",
+        properties: { query: { type: "string" } },
+        required: ["query"],
+        additionalProperties: false,
       },
-    ],
-  });
-
-  llmCalls.push({
-    step: llmCalls.length,
-    ms: performance.now() - answerStart,
-    usage: {
-      prompt: response.usage?.input_tokens ?? 0,
-      completion: response.usage?.output_tokens ?? 0,
-      total: response.usage?.total_tokens ?? 0,
+      strict: false,
     },
-    toolCallCount: response.output.filter((o) => o.type === "function_call").length,
-  });
+  ];
+
+  // Bounded tool loop for the answer call. The model may ask for one more
+  // search when the diff is inconclusive; without executing that call it would
+  // return an empty answer, which is worse than the drift it guards against.
+  let answer = "";
+  let usedSearch = false;
+  const answerInput = [...input];
+  for (let step = 0; step < 2; step++) {
+    const answerStart = performance.now();
+    const response = await openai.responses.create({
+      model,
+      instructions,
+      input: answerInput,
+      tools,
+    });
+    llmCalls.push({
+      step: llmCalls.length,
+      ms: performance.now() - answerStart,
+      usage: {
+        prompt: response.usage?.input_tokens ?? 0,
+        completion: response.usage?.output_tokens ?? 0,
+        total: response.usage?.total_tokens ?? 0,
+      },
+      toolCallCount: response.output.filter((o) => o.type === "function_call")
+        .length,
+    });
+
+    const calls = response.output.filter(
+      (o): o is OpenAI.Responses.ResponseFunctionToolCall =>
+        o.type === "function_call"
+    );
+    if (calls.length === 0) {
+      answer = response.output_text;
+      break;
+    }
+
+    usedSearch = true;
+    answerInput.push(...(response.output as OpenAI.Responses.ResponseInputItem[]));
+    for (const call of calls) {
+      let searchResults: ClaimSource[] = [];
+      try {
+        const parsed = JSON.parse(call.arguments) as { query?: string };
+        if (parsed.query) searchResults = await search(parsed.query);
+      } catch {
+        // Leave the tool output empty; the model can say it found nothing.
+      }
+      answerInput.push({
+        type: "function_call_output",
+        call_id: call.call_id,
+        output: JSON.stringify(searchResults),
+      });
+    }
+  }
 
   // Best-effort, same principle as claims.ts: a ledger failure is traced in
   // the report, never thrown to the user.
@@ -391,13 +481,13 @@ export async function recheck(args: {
   }
 
   return {
-    answer: response.output_text,
+    answer,
     intent,
     queries: cappedQueries,
     claimsChecked: claims.length,
     failedSearches,
     writeBack: writeBackResult,
-    usedSearch: response.output.some((o) => o.type === "function_call"),
+    usedSearch,
     fresh,
     llmCalls,
   };

@@ -247,3 +247,57 @@ test("extraction returns empty for a model that finds no claims", async () => {
   );
   assert.deepEqual(extracted, []);
 });
+
+test("attribute uses the question's concept, not a sibling from the answer", async () => {
+  const sources = [
+    {
+      title: "Node releases",
+      url: "https://nodejs.org/en/about/previous-releases",
+      content: "v26.13.1 Latest LTS",
+    },
+  ];
+  const extracted = await extractClaims(
+    stubModel({
+      claims: [
+        {
+          subject: "Node.js",
+          attribute: "latest LTS release",
+          value: "v26.13.1",
+          url: sources[0].url,
+          quote: "v26.13.1 Latest LTS",
+        },
+      ],
+    }),
+    "stub-model",
+    "v26.13.1 is the latest LTS.",
+    sources,
+    "What is the latest stable Node.js version?"
+  );
+
+  assert.equal(extracted[0].attribute, "latest stable release");
+});
+
+test("extraction is given the user's question so attributes stay grounded", async () => {
+  let capturedInput = "";
+  let capturedInstructions = "";
+  const capturing = {
+    responses: {
+      create: async (params: { input: string; instructions: string }) => {
+        capturedInput = String(params.input);
+        capturedInstructions = String(params.instructions);
+        return { output_text: JSON.stringify({ claims: [] }) };
+      },
+    },
+  } as unknown as OpenAI;
+
+  await extractClaims(
+    capturing,
+    "stub-model",
+    "v26.13.1 is the latest LTS.",
+    SOURCES,
+    "What is the latest stable Node.js version?"
+  );
+
+  assert.match(capturedInput, /latest stable Node\.js version/);
+  assert.match(capturedInstructions, /do not substitute/i);
+});

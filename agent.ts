@@ -123,14 +123,17 @@ async function ledger(
   tracer: Tracer,
   answer: string,
   sources: ClaimSource[],
-  now: Date
+  now: Date,
+  question: string
 ): Promise<void> {
   // No search means no external facts were introduced, so there is nothing to
   // put in the ledger. Skipping saves an LLM call on arithmetic/memory turns.
   if (sources.length === 0) return;
 
   try {
-    const extracted = await extractClaims(openai, model, answer, sources);
+    const extracted = await extractClaims(
+      openai, model, answer, sources, question
+    );
     const result = recordClaims(
       ctx.db,
       ctx.sessionId,
@@ -317,7 +320,7 @@ async function turn(
           });
           // Uses the turn's `now` so the claim's local_date agrees with the
           // question it answers, even across a midnight boundary.
-          await ledger(ctx, tracer, response.output_text, sources, now);
+          await ledger(ctx, tracer, response.output_text, sources, now, userText);
         }
 
         return { answer: response.output_text, stopReason: "answered" };

@@ -20,6 +20,8 @@ import {
   buildDiff,
   writeBack,
   recheck,
+  enforceAttributeMatch,
+  type FreshValue,
 } from "./recheck.js";
 
 function c(
@@ -273,6 +275,136 @@ test("recheck abstains with zero searches when there is nothing to check", async
   assert.equal(called, false);
   assert.equal(report.claimsChecked, 0);
   assert.match(report.answer, /no prior claim/i);
+  db.close();
+});
+
+test("a source describing a different attribute is downgraded to not_found", () => {
+  const claim = c(1, "Node.js", "latest stable release", "v26.13.1", "2026-11-03");
+  const fresh: FreshValue[] = [
+    {
+      claimId: 1,
+      value: "v26.13.1",
+      url: "https://endoflife.date/nodejs",
+      quote: "v26.13.1 Latest LTS",
+      status: "unchanged",
+      matchedAttribute: "latest LTS release",
+    },
+  ];
+
+  const result = enforceAttributeMatch([claim], fresh);
+
+  assert.equal(result[0].status, "not_found");
+  assert.equal(result[0].mismatch, true);
+});
+
+test("the same attribute with different wording still matches", () => {
+  const claim = c(1, "Node.js", "latest stable release", "v26.13.1", "2026-11-03");
+  const fresh: FreshValue[] = [
+    {
+      claimId: 1,
+      value: "v26.13.1",
+      url: "https://neon.com/pricing",
+      quote: "v26.13.1 stable",
+      status: "unchanged",
+      matchedAttribute: "stable release",
+    },
+  ];
+
+  const result = enforceAttributeMatch([claim], fresh);
+
+  assert.equal(result[0].status, "unchanged");
+  assert.equal(result[0].mismatch, undefined);
+});
+
+test("extraction applies the attribute guard and the diff surfaces the mismatch", async () => {
+  const claim = c(1, "Node.js", "latest stable release", "v26.13.1", "2026-11-03");
+  const fresh = await extractFreshValues(
+    stub({
+      results: [
+        {
+          claimId: 1,
+          value: "v26.13.1",
+          url: "https://neon.com/pricing",
+          quote: "v26.13.1 Latest LTS",
+          status: "unchanged",
+          matchedAttribute: "latest LTS release",
+        },
+      ],
+    }),
+    "stub",
+    [claim],
+    SOURCES
+  );
+
+  assert.equal(fresh[0].status, "not_found");
+  const { text } = buildDiff([claim], fresh);
+  assert.match(text, /source describes/);
+  assert.match(text, /latest LTS release/);
+});
+
+test("an answer call that requests a search gets it executed", async () => {
+  const db = freshDb();
+  const claim = recordClaims(
+    db, "s", [extracted("A", "price", "$10")], NOW, IST
+  ).claims[0];
+  let calls = 0;
+  const client = {
+    responses: {
+      create: async () => {
+        calls++;
+        if (calls === 1) {
+          return {
+            output_text: JSON.stringify({
+              results: [
+                {
+                  claimId: claim.id,
+                  value: "$10",
+                  url: "https://neon.com/pricing",
+                  quote: "$10",
+                  status: "unchanged",
+                  matchedAttribute: "price",
+                },
+              ],
+            }),
+            output: [],
+          };
+        }
+        if (calls === 2) {
+          return {
+            output_text: "",
+            output: [
+              {
+                type: "function_call",
+                call_id: "call-1",
+                name: "web_search",
+                arguments: JSON.stringify({ query: "A price" }),
+              },
+            ],
+          };
+        }
+        return { output_text: "Still $10.", output: [] };
+      },
+    },
+  } as unknown as OpenAI;
+  let searched = "";
+
+  const report = await recheck({
+    ctx: { db, sessionId: "s", timeZone: IST },
+    intent: { date: "2026-11-17", phrase: "still correct" },
+    userText: "Is A still correct?",
+    now: NOW,
+    openai: client,
+    model: "stub",
+    instructions: "You are a research assistant.",
+    search: async (q) => {
+      searched = q;
+      return [{ title: "A", url: "https://neon.com/pricing", content: "$10" }];
+    },
+  });
+
+  assert.equal(searched, "A price");
+  assert.equal(report.answer, "Still $10.");
+  assert.equal(report.usedSearch, true);
   db.close();
 });
 

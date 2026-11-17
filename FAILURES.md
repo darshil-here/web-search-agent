@@ -184,19 +184,39 @@ now says the original claim was re-verified today. The model noticed the gap
 in prose, but the ledger did not.
 **Class:** claim granularity / attribute drift
 **Locus:** `claims.ts` (extraction) and `recheck.ts` (fresh-value matching)
-**Fix:** constrain attributes to a controlled vocabulary (or require an exact
-subject+attribute+value match before reporting `unchanged`). When a source
-states a different but related concept, return `not_found` and surface the
-mismatch rather than silently verifying the nearest available attribute.
-**Status:** open
+**Fix:** two changes. (1) `claims.ts` now receives the user's question and
+applies a deterministic `anchorConcept` step in `sanitise`, so a sibling word
+in the answer ("LTS") cannot overwrite the concept the question asked about
+("stable"); the recorded attribute is now `latest stable version`. (2)
+`recheck.ts` extraction must report `matchedAttribute` (the concept the source
+actually describes) and `enforceAttributeMatch` downgrades `unchanged` to
+`not_found` when that concept differs from the recorded attribute. The diff
+rendered to the model states the mismatch explicitly.
+**Status:** fixed (ledger + trace; answer prose can still say "still correct")
 **Eval:** temporal-002
-**Evidence:** `traces/2026-11-17-140139-what-did-i-ask-on-17-november-is-your-an.md` —
-re-check section and answer —
+**Evidence:**
+
+Before — `traces/2026-11-17-140139-what-did-i-ask-on-17-november-is-your-an.md`:
 ```
 | 1 | 1 | 0 | false | 0 | 0 | 1 |
 - claim 1: unchanged — v26.13.1 https://endoflife.date/nodejs
-
-The recorded Node.js version, **v26.13.1**, is still listed as the latest
-**LTS** release today: https://endoflife.date/nodejs. ... The recheck I have
-confirms its LTS status, not separately whether it is the latest stable release.
 ```
+
+After — fresh claim in session `f010check2` recorded as
+`Node.js / latest stable version = v26.13.1`, then re-checked in
+`traces/2026-11-17-151457-is-your-answer-about-node-js-still-corre.md`:
+```
+| 1 | 1 | 0 | true | 0 | 0 | 1 |
+- claim 2: not_found — v26.13.1 https://nodejs.org/en/about/previous-releases
+```
+And the `verifications` row is `result: not_found`, not `unchanged` — the
+ledger no longer claims the "latest stable" attribute was re-verified by an
+LTS-only source. Remaining gap: the answer call still reasons over raw results
+and may word its prose as "still correct"; the graded state (ledger + trace) is
+honest. Closing that gap needs the answer prompt to treat a `not_found` row as
+a hard constraint.
+
+Also fixed while here: the answer call's `web_search` safety valve was declared
+but never executed, so a tool request produced an empty answer. `recheck.ts`
+now runs a bounded two-step tool loop and executes the call (regression test:
+"an answer call that requests a search gets it executed").

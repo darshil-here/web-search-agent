@@ -39,10 +39,21 @@ Do NOT extract:
 
 For each claim:
 - subject:   the entity, e.g. "Neon free tier", "ChatGPT Plus"
-- attribute: the property, e.g. "storage quota", "monthly price", "latest LTS"
+- attribute: the property the USER actually asked about, e.g. "storage quota",
+             "monthly price", "latest stable release". Do not substitute a
+             related but different concept — never write "latest LTS" for a
+             question about "latest stable", or "free tier" for "paid tier".
 - value:     the short factual value, e.g. "10 GB", "$20/month", "26.13.1"
 - url:       the EXACT source URL supporting it, or null if none
 - quote:     a short verbatim snippet from that source, or null
+
+The user's question is given below. Use its wording to choose the attribute.
+If the answer and the question disagree about the concept, prefer the question
+and keep the attribute tied to it. A source may label the value with a related
+but different concept (e.g. "LTS" where the question said "stable"): that is
+still extractable. Record the value under the question's attribute and let the
+re-check step handle the concept mismatch. Do not drop the claim only because
+of that wording difference.
 
 If there are no such claims, return an empty claims array.`;
 
@@ -73,6 +84,35 @@ const CLAIMS_SCHEMA = {
 const clip = (s: string, max: number): string =>
   s.replace(/\s+/g, " ").trim().slice(0, max);
 
+// Known siblings must never be substituted for one another. The first match
+// wins so a question about "latest stable release" is anchored to "stable",
+// even when the answer and source only talk about "LTS".
+const CONCEPT_WORDS: Array<{ word: string; pattern: RegExp }> = [
+  { word: "stable", pattern: /\bstable\b/i },
+  { word: "LTS", pattern: /\blts\b|long[- ]term support/i },
+  { word: "alpha", pattern: /\balpha\b/i },
+  { word: "beta", pattern: /\bbeta\b/i },
+  { word: "current", pattern: /\bcurrent\b/i },
+  { word: "free tier", pattern: /\bfree\b|\bfree tier\b/i },
+  { word: "paid tier", pattern: /\bpaid\b|\bpro\b|\bpremium\b/i },
+];
+
+/** Anchor a sibling concept in the attribute to the wording of the question. */
+function anchorConcept(attribute: string, question?: string): string {
+  if (!question) return attribute;
+  for (const concept of CONCEPT_WORDS) {
+    if (concept.pattern.test(attribute) && !concept.pattern.test(question)) {
+      const replacement = CONCEPT_WORDS.find(
+        (c) => c.word !== concept.word && c.pattern.test(question)
+      );
+      if (replacement) {
+        return attribute.replace(concept.pattern, replacement.word);
+      }
+    }
+  }
+  return attribute;
+}
+
 /**
  * Defensive cleanup: the model can't invent a URL we did not retrieve, can't
  * emit empty fields, and can't repeat the same claim three times. Length caps
@@ -80,7 +120,8 @@ const clip = (s: string, max: number): string =>
  */
 function sanitise(
   raw: ExtractedClaim[],
-  sources: ClaimSource[]
+  sources: ClaimSource[],
+  question?: string
 ): ExtractedClaim[] {
   const allowedUrls = new Set(sources.map((s) => s.url));
   const seen = new Set<string>();
@@ -88,7 +129,7 @@ function sanitise(
 
   for (const claim of raw) {
     const subject = clip(claim.subject ?? "", 200);
-    const attribute = clip(claim.attribute ?? "", 200);
+    const attribute = anchorConcept(clip(claim.attribute ?? "", 200), question);
     const value = clip(claim.value ?? "", 300);
     if (!subject || !attribute || !value) continue;
 
@@ -109,7 +150,8 @@ export async function extractClaims(
   openai: OpenAI,
   model: string,
   answer: string,
-  sources: ClaimSource[]
+  sources: ClaimSource[],
+  question?: string
 ): Promise<ExtractedClaim[]> {
   const sourceBlock =
     sources.length === 0
@@ -121,7 +163,9 @@ export async function extractClaims(
   const response = await openai.responses.create({
     model,
     instructions: EXTRACT_INSTRUCTIONS,
-    input: `ANSWER:\n${answer}\n\nSOURCES:\n${sourceBlock}`,
+    input:
+      `USER QUESTION:\n${question ?? "(not supplied)"}\n\n` +
+      `ANSWER:\n${answer}\n\nSOURCES:\n${sourceBlock}`,
     text: {
       format: {
         type: "json_schema",
@@ -135,7 +179,7 @@ export async function extractClaims(
   const parsed = JSON.parse(response.output_text) as {
     claims: ExtractedClaim[];
   };
-  return sanitise(parsed.claims ?? [], sources);
+  return sanitise(parsed.claims ?? [], sources, question);
 }
 
 export type RecordResult = {
