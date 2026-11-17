@@ -5,7 +5,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { rmSync } from "node:fs";
-import { openDb, saveTurn } from "../src/db.js";
+import { openDb, saveClaim, saveTurn } from "../src/db.js";
 import { buildNotebook, NOTEBOOK_MAX_BYTES } from "../src/notebook.js";
 
 const PATH = "data/notebook-test.db";
@@ -31,6 +31,78 @@ function seed(
     localDate: date,
   });
 }
+
+test("the notebook injects open claims after turns", () => {
+  const db = freshDb();
+  seed(db, "2026-11-16", "an earlier question");
+  saveClaim(db, {
+    sessionId: "s",
+    subject: "Node.js",
+    attribute: "latest stable version",
+    value: "v26.13.1",
+    url: "https://nodejs.org/en/download",
+    quote: "v26.13.1",
+    observedAt: "2026-11-17T05:00:00.000Z",
+    localDate: "2026-11-17",
+  });
+
+  const notebook = buildNotebook(
+    { db, sessionId: "s", timeZone: IST },
+    "what do we know about Node?",
+    NOW
+  );
+
+  assert.equal(notebook.claims, 1);
+  assert.match(notebook.text, /Current beliefs/);
+  assert.match(notebook.text, /Node\.js \/ latest stable version = v26\.13\.1/);
+  assert.ok(
+    notebook.text.indexOf("an earlier question") <
+      notebook.text.indexOf("Current beliefs"),
+    "claims must come after turns"
+  );
+  db.close();
+});
+
+test("no claims means no beliefs block", () => {
+  const db = freshDb();
+  const notebook = buildNotebook(
+    { db, sessionId: "s", timeZone: IST },
+    "hello",
+    NOW
+  );
+  assert.equal(notebook.claims, 0);
+  assert.doesNotMatch(notebook.text, /Current beliefs/);
+  db.close();
+});
+
+test("claims survive the budget while old turns are dropped", () => {
+  const db = freshDb();
+  for (let i = 0; i < 30; i++) {
+    seed(db, "2026-11-16", `turn ${i} ${"x".repeat(700)}`);
+  }
+  saveClaim(db, {
+    sessionId: "s",
+    subject: "A",
+    attribute: "price",
+    value: "$10",
+    url: null,
+    quote: null,
+    observedAt: "2026-11-17T05:00:00.000Z",
+    localDate: "2026-11-17",
+  });
+
+  const notebook = buildNotebook(
+    { db, sessionId: "s", timeZone: IST },
+    "what do we know?",
+    NOW
+  );
+
+  assert.ok(notebook.bytes <= NOTEBOOK_MAX_BYTES);
+  assert.equal(notebook.truncated, true);
+  assert.match(notebook.text, /Current beliefs/);
+  assert.match(notebook.text, /A \/ price = \$10/);
+  db.close();
+});
 
 test("a named date fetches that date only", () => {
   const db = freshDb();

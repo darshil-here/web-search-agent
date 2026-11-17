@@ -195,6 +195,7 @@ async function turn(
     refs: notebook.refs.map((ref) => ref.label),
     dates: notebook.dates,
     rows: notebook.rows,
+    claims: notebook.claims,
     bytes: notebook.bytes,
     truncated: notebook.truncated,
   });

@@ -59,6 +59,7 @@ type Recall = {
   refs: string[];
   dates: string[];
   rows: number;
+  claims: number;
   bytes: number;
   truncated: boolean;
 };
@@ -383,9 +384,9 @@ export class Tracer {
         "",
         "## Notebook",
         "",
-        `| mode | rows | bytes | truncated |`,
-        "|------|-----:|------:|:----------|",
-        `| ${recall.mode} | ${recall.rows} | ${recall.bytes} | ${recall.truncated} |`,
+        "| mode | rows | claims | bytes | truncated |",
+        "|------|-----:|-------:|------:|:----------|",
+        `| ${recall.mode} | ${recall.rows} | ${recall.claims} | ${recall.bytes} | ${recall.truncated} |`,
         ""
       );
       if (recall.refs.length > 0) {

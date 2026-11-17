@@ -9,9 +9,16 @@
 //
 // The output has a hard byte budget. Memory that grows without a bound is a
 // token bill and a slower first step on every question.
-import { recentTurns, turnsOnDate, type SessionContext, type Turn } from "./db.js";
+import {
+  openClaims,
+  recentTurns,
+  turnsOnDate,
+  type Claim,
+  type SessionContext,
+  type Turn,
+} from "./db.js";
 import { describeNow, parseDateRefs, type DateRef } from "./dates.js";
-import { clipWithEllipsis } from "./text.js";
+import { clip, clipWithEllipsis } from "./text.js";
 
 export type Notebook = {
   text: string;
@@ -19,6 +26,7 @@ export type Notebook = {
   refs: DateRef[];
   dates: string[];
   rows: number;
+  claims: number;
   bytes: number;
   truncated: boolean;
 };
@@ -26,12 +34,24 @@ export type Notebook = {
 export const NOTEBOOK_MAX_BYTES = 4096;
 const TURN_CLIP = 600;
 const RECENT_TURNS = 8;
+const MAX_CLAIMS = 12;
+const CLAIM_FIELD = { subject: 80, attribute: 80, value: 160, url: 120 };
 
 function turnLine(turn: Turn): string {
   return `  ${turn.role} (${turn.createdAt}): ${clipWithEllipsis(
     turn.content,
     TURN_CLIP
   )}`;
+}
+
+function claimLine(claim: Claim): string {
+  const url = claim.url ? ` [${clip(claim.url, CLAIM_FIELD.url)}]` : "";
+  return (
+    `  - ${clip(claim.subject, CLAIM_FIELD.subject)} / ` +
+    `${clip(claim.attribute, CLAIM_FIELD.attribute)} = ` +
+    `${clip(claim.value, CLAIM_FIELD.value)} ` +
+    `(observed ${claim.localDate})${url}`
+  );
 }
 
 function render(
@@ -99,6 +119,13 @@ export function buildNotebook(
     }
   }
 
+  // Appended last so the budget trims old turns before current beliefs.
+  const beliefs = openClaims(ctx.db, ctx.sessionId).slice(0, MAX_CLAIMS);
+  if (beliefs.length > 0) {
+    blocks.push("Current beliefs recorded in this conversation:");
+    for (const belief of beliefs) blocks.push(claimLine(belief));
+  }
+
   const header =
     `Earlier turns in this conversation. Session "${ctx.sessionId}", ` +
     `timezone ${ctx.timeZone}, today ${describeNow(now, ctx.timeZone).iso}.`;
@@ -111,6 +138,7 @@ export function buildNotebook(
     refs,
     dates,
     rows,
+    claims: beliefs.length,
     bytes: Buffer.byteLength(text, "utf8"),
     truncated,
   };
