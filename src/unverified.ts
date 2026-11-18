@@ -18,14 +18,15 @@ export type UnverifiedResult = { answer: string; rewritten: string[] };
 
 const SENTENCE = /(?<=[.!?])\s+/;
 
-// A sentence that hedges, or that places the value in the past, is already
-// honest. Both patterns are deliberately broad: the cost of a false positive
-// is a needlessly cautious sentence, the cost of a false negative is a price
+// Only an explicit hedge makes a sentence honest. A past-tense marker such as
+// "recorded" or "last Tuesday" is NOT enough: the live brief-3 failure put the
+// recorded price and a current-price assertion in the same sentence. The
+// rewrite already states the recorded value and its date, so applying it to a
+// past-framed sentence loses nothing. The cost of a false positive is a
+// needlessly cautious sentence; the cost of a false negative is a price
 // asserted from memory — the failure this guard exists to prevent.
 const HEDGE =
   /\b(?:could(?:n't| not)|can(?:'t|not)|unable|no (?:fresh )?(?:source|data)|not found|unverif(?:ied|iable)|don't know|do not know|unknown|(?:did|do|does) not (?:find|confirm)|didn't (?:find|confirm))\b/i;
-const HISTORY =
-  /\b(?:recorded|observed|previously|originally|earlier|was|were|last (?:week|month|year|time|monday|tuesday|wednesday|thursday|friday|saturday|sunday)|at the time|asked|wrote)\b/i;
 
 function rewriteValue(claim: UnverifiedClaim): string {
   return (
@@ -39,8 +40,9 @@ function rewriteValue(claim: UnverifiedClaim): string {
 /**
  * Replace any sentence that presents an unverified recorded value as the
  * current value with an explicit "could not verify" statement. A sentence that
- * frames the value as history, or that already says it could not be verified,
- * is left intact. Returns the answer untouched when there is nothing to do.
+ * already says it could not be verified is left intact; the rewrite keeps the
+ * recorded value and its observed date. Returns the answer untouched when there
+ * is nothing to do.
  */
 export function guardUnverified(
   answer: string,
@@ -58,7 +60,7 @@ export function guardUnverified(
     const hit = checkable.find((claim) =>
       lower.includes(claim.value.toLowerCase())
     );
-    if (!hit || HEDGE.test(part) || HISTORY.test(part)) {
+    if (!hit || HEDGE.test(part)) {
       kept.push(part);
       continue;
     }

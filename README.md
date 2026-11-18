@@ -92,9 +92,11 @@ re-verified today is not mistaken for one never checked. Set
 
 "Not found" never becomes "still correct." The answer call is told explicitly
 that an unverified row's recorded value is history, and `unverified.ts` rewrites
-any sentence that presents it as current into a "could not verify" statement.
-Sentences that frame the value in the past or already hedge it are left alone,
-and every rewrite is traced as `recheck_rewrites`.
+any sentence that presents it as current into a "could not verify" statement
+that still names the recorded value and its date. Only an explicit hedge ("could
+not verify", "did not confirm") exempts a sentence — a past-tense marker is not
+enough, because the same sentence can record a value and assert it as current.
+Every rewrite is traced as `recheck_rewrites`.
 
 ## Answer grounding
 

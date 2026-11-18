@@ -18,7 +18,7 @@ having no retrieved source for it.
 | Enforcement | Deterministic post-guard in code, following `calibration.ts` and `scope.ts`. The prompt is secondary; the code is the contract. |
 | Which rows | A recorded claim whose fresh status is `not_found`, including the attribute-mismatch downgrade from `enforceAttributeMatch`. |
 | What is rewritten | A sentence that names an unverified value without framing it as a past observation and without saying it could not be verified. It becomes an explicit "could not verify a current value" statement that still names the subject, attribute, recorded value and observed date. |
-| What is kept | Sentences that frame the value as history ("recorded", "observed", "last Tuesday", "previously"…) or that hedge it ("could not verify", "did not confirm", "not found"…). |
+| What is kept | Only sentences that explicitly hedge it ("could not verify", "did not confirm", "not found"…). A past-tense marker alone ("recorded", "last Tuesday") is not an exemption: the rewrite preserves the value and date, and the live brief-3 failure mixed a past observation with a current assertion in one sentence. |
 | Hard constraint | The re-check answer call also gets a developer message stating that `not_found` rows are unverified and their values must never be presented as current. |
 | Trace | The rewrite count and the rewritten sentences appear in the re-check trace. |
 | Eval | Strengthen the existing `brief-3` case rather than adding a 19th case, so the brief's own example is the regression guard. |
@@ -32,7 +32,7 @@ recheck(...)
   → answer call gets <recheck-diff> + UNVERIFIED_CONSTRAINT developer message
   → guardUnverified(answer, unverified)
       → split into sentences
-      → value present && !HEDGE && !HISTORY  ⇒  rewrite to "could not verify"
+      → value present && !HEDGE  ⇒  rewrite to "could not verify"
       → otherwise keep as-is
   → RecheckReport.guard = { rewritten: [...] }
   → tracer.recheck(report) renders the rewrites

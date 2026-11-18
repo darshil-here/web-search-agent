@@ -35,8 +35,9 @@ as current; close the live `brief-3` failure.
    - `rewrites a sentence that states an unverified value as current` — expect
      the answer to contain "could not verify a current value", the subject,
      attribute, value and recorded date, and `rewritten.length === 1`.
-   - `keeps a recorded value framed as a past observation` — "I recorded
-     $19/month last Tuesday…" is unchanged.
+   - `rewrites a sentence that mixes a past observation with a current
+     assertion` — "I recorded $19/month last Tuesday, but the current price is
+     still $19/month." is rewritten. A past-tense marker is not an exemption.
    - `keeps a sentence that says the value could not be verified` — hedge kept.
    - `is a no-op with no unverified claims` — answer identical, no rewrites.
 

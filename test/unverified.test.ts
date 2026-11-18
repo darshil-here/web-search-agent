@@ -29,13 +29,28 @@ test("rewrites a sentence that states an unverified value as current", () => {
   assert.doesNotMatch(result.answer, /current price is still/);
 });
 
-test("keeps a recorded value framed as a past observation", () => {
+test("rewrites a sentence that mixes a past observation with a current assertion", () => {
+  const answer =
+    "I recorded $19/month last Tuesday, but the current price is still $19/month.";
+
+  const result = guardUnverified(answer, HOSTING);
+
+  assert.equal(result.rewritten.length, 1);
+  assert.match(result.answer, /could not verify a current value/);
+  assert.doesNotMatch(result.answer, /current price is still/);
+});
+
+test("rewrites even a past-framed value unless the sentence explicitly hedges", () => {
+  // A "recorded"/"last Tuesday" marker in the same sentence is not a promise
+  // that the value is not also being asserted as current. The rewrite keeps
+  // the value and its date, so no information is lost.
   const answer = "I recorded $19/month last Tuesday, so that is what I wrote then.";
 
-  assert.deepEqual(guardUnverified(answer, HOSTING), {
-    answer,
-    rewritten: [],
-  });
+  const result = guardUnverified(answer, HOSTING);
+
+  assert.equal(result.rewritten.length, 1);
+  assert.match(result.answer, /recorded on 2026-11-10/);
+  assert.match(result.answer, /not confirmed as current/);
 });
 
 test("keeps a sentence that says the value could not be verified", () => {
