@@ -43,6 +43,7 @@ export type RecheckTrace = {
     matchedAttribute?: string | null;
   }>;
   errors: { extraction?: string; writeBack?: string };
+  guard?: { rewritten: string[] };
 };
 
 type RunStart = {
@@ -336,6 +337,7 @@ export class Tracer {
       `tool_calls: ${this.toolCalls.length}`,
       `claims: ${this.claimInfo?.extracted ?? 0}`,
       `recheck_claims: ${this.recheckInfo?.claimsChecked ?? 0}`,
+      `recheck_rewrites: ${this.recheckInfo?.guard?.rewritten.length ?? 0}`,
       `critic_statements: ${this.criticInfo?.statements ?? 0}`,
       `critic_dropped: ${this.criticInfo?.dropped ?? 0}`,
       `scope_removed: ${this.scopeInfo?.removed.length ?? 0}`,
@@ -489,6 +491,14 @@ export class Tracer {
         );
       }
       lines.push("");
+
+      if (r.guard && r.guard.rewritten.length > 0) {
+        lines.push("", "### Unverified claims", "");
+        for (const sentence of r.guard.rewritten) {
+          lines.push(`- rewrote: ${tableCell(sentence)}`);
+        }
+        lines.push("");
+      }
     }
 
     if (this.finalInfo?.stopReason === "budget") {

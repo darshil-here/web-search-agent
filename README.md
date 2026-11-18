@@ -90,6 +90,12 @@ and "not found" — is written to a `verifications` table, so a fact that was
 re-verified today is not mistaken for one never checked. Set
 `MAX_RECHECK_SEARCHES` (default 8) to bound the fan-out.
 
+"Not found" never becomes "still correct." The answer call is told explicitly
+that an unverified row's recorded value is history, and `unverified.ts` rewrites
+any sentence that presents it as current into a "could not verify" statement.
+Sentences that frame the value in the past or already hedge it are left alone,
+and every rewrite is traced as `recheck_rewrites`.
+
 ## Answer grounding
 
 On the ordinary search path, answers that contain a table or at least three

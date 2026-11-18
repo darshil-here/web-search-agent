@@ -146,6 +146,39 @@ test("a finished run renders its phases and an ok verdict", () => {
   }
 });
 
+test("unverified rewrites render in the trace", () => {
+  const dir = tempDir();
+  try {
+    const tracer = new Tracer("Has pricing changed?", dir);
+    tracer.recheck({
+      intent: { date: "2026-11-10", phrase: "changed since" },
+      queries: ["Postgres hosting price"],
+      claimsChecked: 1,
+      failedSearches: 0,
+      usedSearch: false,
+      writeBack: { inserted: 0, superseded: 0, verifications: 1 },
+      fresh: [],
+      errors: {},
+      guard: { rewritten: ["The current price is still $19/month."] },
+    });
+
+    const original = console.log;
+    console.log = () => {};
+    let path: string;
+    try {
+      path = tracer.flush();
+    } finally {
+      console.log = original;
+    }
+    const text = readFileSync(path, "utf8");
+    assert.match(text, /recheck_rewrites: 1/);
+    assert.match(text, /## Unverified claims/);
+    assert.match(text, /current price is still \$19\/month/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("an exhausted loop and a thrown error change the verdict", () => {
   const dir = tempDir();
   try {

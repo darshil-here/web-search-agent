@@ -215,7 +215,7 @@ asked about ("stable"); the recorded attribute is now `latest stable version`. (
 actually describes) and `enforceAttributeMatch` downgrades `unchanged` to
 `not_found` when that concept differs from the recorded attribute. The diff
 rendered to the model states the mismatch explicitly.
-**Status:** fixed (ledger + trace; answer prose can still say "still correct")
+**Status:** fixed (ledger, trace and answer prose — the remaining prose gap is closed by F-011)
 **Eval:** temporal-002
 **Evidence:**
 
@@ -234,15 +234,28 @@ After — fresh claim in session `f010check2` recorded as
 ```
 And the `verifications` row is `result: not_found`, not `unchanged` — the
 ledger no longer claims the "latest stable" attribute was re-verified by an
-LTS-only source. Remaining gap: the answer call still reasons over raw results
-and may word its prose as "still correct"; the graded state (ledger + trace) is
-honest. Closing that gap needs the answer prompt to treat a `not_found` row as
-a hard constraint.
+LTS-only source. The prose gap noted here — an answer that still says "still
+correct" over a `not_found` row — is closed by F-011.
 
 Also fixed while here: the answer call's `web_search` safety valve was declared
 but never executed, so a tool request produced an empty answer. `recheck.ts`
 now runs a bounded two-step tool loop and executes the call (regression test:
 "an answer call that requests a search gets it executed").
+
+## F-011 — An unverified value was asserted as current
+**Input:** "Last Tuesday I asked you about Postgres hosting. Has any pricing changed since then?" (brief example 3)
+**Expected:** state the recorded $19/month as history and say a fresh price could not be verified.
+**Actual:** the live judge found "the answer asserts the current price is still $19/month despite having no retrieved source, so the current price is unsupported and appears asserted from memory."
+**Class:** unverified assertion / temporal discipline
+**Locus:** pipeline
+**Fix:** two changes in the re-check path. `recheck.ts` injects a hard-constraint developer message telling the answer call that a `not_found` row (including an attribute mismatch) is unverified and its value must never be presented as current. `unverified.ts` enforces that in code: a sentence that names an unverified value without framing it as history and without hedging it is rewritten to "I could not verify a current value for …; the recorded value was … but is not confirmed as current." Sentences that say "recorded", "last Tuesday", "could not verify" or "did not confirm" are left intact, so the honest answer stays available. The rewrite count and the rewritten sentences are traced.
+**Status:** fixed in code; a fresh live sweep is still needed to confirm the judge agrees
+**Eval:** brief-3 (probe strengthened to feed the failed answer shape through the guard)
+**Evidence:** the failing live row in `eval/curated/final.md`:
+```
+| brief-3 | FAIL | The answer asserts the current price is still $19/month despite having no retrieved source, so the current price is unsupported and appears asserted from memory. |
+```
+Offline regression: `npm run eval` — `PASS brief-3`, 18/18 overall.
 
 ## Live eval evidence for the grounding changes (2026-11-17)
 

@@ -13,6 +13,7 @@ import type { RecheckIntent } from "./detect.js";
 import type { Llm, LlmCall, PromptMessage, StopReason, Usage } from "./llm.js";
 import type { SearchResult } from "./search.js";
 import { clip } from "./text.js";
+import { guardUnverified } from "./unverified.js";
 
 export type FreshStatus = "changed" | "unchanged" | "not_found";
 
@@ -31,6 +32,17 @@ export type FreshValue = {
 
 /** How many model calls the answer may take: the answer, plus one search retry. */
 const ANSWER_STEPS = 2;
+
+// The diff tells the model what is unknown; this tells it what that means. A
+// second developer message rather than a global prompt rule, so the constraint
+// only costs tokens on a re-check. The deterministic guard below is the real
+// enforcement — this message exists so the model does not fight it.
+const UNVERIFIED_CONSTRAINT = `Hard constraint: a row in <recheck-diff> whose status is not_found
+(or whose mismatch note is present) is UNVERIFIED. The recorded value is history,
+not a current observation. Never present its recorded value as the current value.
+You may mention it only as a past observation with its observed date. If every
+row is unverified, say plainly that you could not verify a current value and do
+not claim the earlier answer is still correct.`;
 
 export function buildQueries(claims: Claim[]): string[] {
   const seen = new Set<string>();
@@ -271,6 +283,8 @@ export type RecheckReport = {
   writeBack: WriteBackResult;
   usedSearch: boolean;
   fresh: FreshValue[];
+  /** Sentences that presented an unverified value as current, rewritten in code. */
+  guard: { rewritten: string[] };
   /** Every model call the re-check made, for the trace. */
   llmCalls: LlmCall[];
   /** Things that went wrong but did not stop the answer. */
@@ -291,6 +305,7 @@ function newReport(
     writeBack: { inserted: 0, superseded: 0, verifications: 0 },
     usedSearch: false,
     fresh: [],
+    guard: { rewritten: [] },
     llmCalls: [],
     errors: {},
     ...overrides,
@@ -392,6 +407,7 @@ export async function recheck(args: {
       ? [{ role: "developer" as const, content: args.notebookText }]
       : []),
     { role: "developer", content: diff },
+    { role: "developer", content: UNVERIFIED_CONSTRAINT },
     { role: "user", content: args.userText },
   ];
 
@@ -429,22 +445,42 @@ export async function recheck(args: {
     errors.writeBack = message(err);
   }
 
+  // Every claim the fresh search could not confirm is unverified: its recorded
+  // value is history, not a current observation. Apply the guard below to the
+  // answer so a model that ignores the diff cannot turn history into a price.
+  const unverified = claims
+    .filter((claim) => {
+      const value = fresh.find((item) => item.claimId === claim.id);
+      return !value || value.status === "not_found" || value.mismatch === true;
+    })
+    .map((claim) => ({
+      subject: claim.subject,
+      attribute: claim.attribute,
+      value: claim.value,
+      localDate: claim.localDate,
+    }));
+
   // A model can say "answered" with empty text. Treat that as the failure it
   // is rather than handing the user a blank reply (the F-009 lesson).
   const empty = turn.text.trim() === "";
+  const failed = turn.stopReason === "budget" || empty;
+  const guarded = failed
+    ? { answer: "", rewritten: [] as string[] }
+    : guardUnverified(turn.text, unverified);
+
   return newReport(intent, {
-    answer:
-      turn.stopReason === "budget" || empty
-        ? `I stopped while writing the re-check for ${intent.date} without an answer. ` +
-          `Try asking again, or ask about one claim at a time.`
-        : turn.text,
-    stopReason: turn.stopReason === "budget" || empty ? "budget" : turn.stopReason,
+    answer: failed
+      ? `I stopped while writing the re-check for ${intent.date} without an answer. ` +
+        `Try asking again, or ask about one claim at a time.`
+      : guarded.answer,
+    stopReason: failed ? "budget" : turn.stopReason,
     queries: cappedQueries,
     claimsChecked: claims.length,
     failedSearches,
     writeBack: writeBackResult,
     usedSearch,
     fresh,
+    guard: { rewritten: guarded.rewritten },
     llmCalls,
     errors,
   });

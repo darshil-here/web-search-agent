@@ -10,7 +10,7 @@ import {
   type Claim,
 } from "../src/db.js";
 import { recordClaims } from "../src/claims.js";
-import type { Llm, TurnRequest, Usage } from "../src/llm.js";
+import type { Llm, PromptMessage, TurnRequest, Usage } from "../src/llm.js";
 import {
   buildQueries,
   extractFreshValues,
@@ -463,5 +463,107 @@ test("a failed extraction is reported and leaves every claim not_found", async (
   assert.equal(report.fresh[0].status, "not_found");
   assert.equal(report.answer, "I could not verify the current price.");
   assert.equal(report.writeBack.verifications, 1);
+  db.close();
+});
+
+test("an answer that ignores the diff is rewritten to an honest statement", async () => {
+  const db = freshDb();
+  const claim = recordClaims(
+    db, "s", [extracted("Postgres hosting", "price", "$19/month")], NOW, IST
+  ).claims[0];
+
+  const llm: Llm = {
+    structured: async <T>() => ({
+      data: {
+        results: [
+          {
+            claimId: claim.id,
+            value: "",
+            url: null,
+            quote: null,
+            status: "not_found",
+          },
+        ],
+      } as T,
+      usage: NO_USAGE,
+    }),
+    turn: async () => ({
+      text: "The current price is still $19/month.",
+      stopReason: "answered",
+    }),
+  };
+
+  const report = await recheck({
+    ctx: { db, sessionId: "s", timeZone: IST },
+    intent: { date: "2026-11-10", phrase: "changed since" },
+    userText: "Has any pricing changed since last Tuesday?",
+    now: NOW,
+    llm,
+    instructions: "You are a research assistant.",
+    search: async () => [
+      { title: "Hosting", url: "https://neon.com/pricing", content: "pricing page" },
+    ],
+    maxSearches: 8,
+  });
+
+  assert.equal(report.fresh[0].status, "not_found");
+  assert.match(report.answer, /could not verify a current value/);
+  assert.doesNotMatch(report.answer, /current price is still/);
+  assert.equal(report.guard.rewritten.length, 1);
+  db.close();
+});
+
+test("the answer call is told not_found rows are unverified", async () => {
+  const db = freshDb();
+  const claim = recordClaims(
+    db, "s", [extracted("A", "price", "$10")], NOW, IST
+  ).claims[0];
+  let inputs: PromptMessage[] = [];
+
+  const llm: Llm = {
+    structured: async <T>() => ({
+      data: {
+        results: [
+          {
+            claimId: claim.id,
+            value: "",
+            url: null,
+            quote: null,
+            status: "not_found",
+          },
+        ],
+      } as T,
+      usage: NO_USAGE,
+    }),
+    turn: async (request: TurnRequest) => {
+      inputs = request.input;
+      return { text: "I could not verify a current price.", stopReason: "answered" };
+    },
+  };
+
+  await recheck({
+    ctx: { db, sessionId: "s", timeZone: IST },
+    intent: { date: "2026-11-17", phrase: "still correct" },
+    userText: "Is A still correct?",
+    now: NOW,
+    llm,
+    instructions: "You are a research assistant.",
+    search: async () => [
+      { title: "A", url: "https://neon.com/pricing", content: "$10" },
+    ],
+    maxSearches: 8,
+  });
+
+  const developer = inputs.filter((message) => message.role === "developer");
+  assert.ok(
+    developer.some((message) =>
+      /Never present its recorded value as the current value/.test(message.content)
+    ),
+    "no hard-constraint developer message was injected"
+  );
+  assert.ok(
+    developer.some((message) => message.content.includes("not_found")),
+    "the diff should also name not_found rows"
+  );
   db.close();
 });

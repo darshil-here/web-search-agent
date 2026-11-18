@@ -24,6 +24,7 @@ import { detectRecheck } from "../src/detect.js";
 import { buildQueries, enforceAttributeMatch, writeBack } from "../src/recheck.js";
 import { extractClaims } from "../src/claims.js";
 import { sameAttribute } from "../src/concepts.js";
+import { guardUnverified } from "../src/unverified.js";
 
 export const IST = "Asia/Kolkata";
 /** Tuesday 17 November 2026, 11:30 IST. */
@@ -186,12 +187,32 @@ export const CASES: EvalCase[] = [
     probe: (ctx) => {
       const intent = detectRecheck(ctx.question, ctx.now, ctx.timeZone);
       const claims = claimsForDate(ctx.db, ctx.sessionId, "2026-11-10");
-      return { intent, queries: buildQueries(claims) };
+      // The live judge saw the recorded price asserted as current with no
+      // source. Feed that exact shape through the guard so the regression is
+      // caught offline, not only in a live sweep.
+      const guarded = guardUnverified(
+        "The current price is still $19/month.",
+        claims.map((claimRow) => ({
+          subject: claimRow.subject,
+          attribute: claimRow.attribute,
+          value: claimRow.value,
+          localDate: claimRow.localDate,
+        }))
+      );
+      return { intent, queries: buildQueries(claims), guarded };
     },
     check: (o) => {
       const intent = o.intent as ReturnType<typeof detectRecheck>;
       if (intent?.date !== "2026-11-10") return `date ${intent?.date}`;
       if ((o.queries as string[]).length !== 1) return "expected one query";
+      const guarded = o.guarded as { answer: string; rewritten: string[] };
+      if (guarded.rewritten.length !== 1) return "unverified value was not rewritten";
+      if (!guarded.answer.includes("could not verify a current value")) {
+        return "rewrite does not state the inability to verify";
+      }
+      if (guarded.answer.includes("current price is still")) {
+        return "recorded value still asserted as current";
+      }
       return null;
     },
     rubric: {
