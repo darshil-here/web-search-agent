@@ -18,6 +18,7 @@ import {
   writeBack,
   recheck,
   enforceAttributeMatch,
+  enforceValueInSources,
   type FreshValue,
 } from "../src/recheck.js";
 
@@ -351,6 +352,145 @@ test("the same attribute with different wording still matches", () => {
 
   assert.equal(result[0].status, "unchanged");
   assert.equal(result[0].mismatch, undefined);
+});
+
+test("a reported value that appears in no source is downgraded to not_found", () => {
+  const fresh: FreshValue[] = [
+    {
+      claimId: 1,
+      value: "$19/month",
+      url: "https://medium.com/hosting",
+      quote: "$19/month",
+      status: "unchanged",
+    },
+  ];
+  const sources = [
+    {
+      title: "Hosting prices",
+      url: "https://medium.com/hosting",
+      content: "Some providers are free; see the linked table.",
+    },
+  ];
+
+  const result = enforceValueInSources(sources, fresh);
+
+  assert.equal(result[0].status, "not_found");
+  assert.equal(result[0].valueNotInSources, true);
+});
+
+test("a reported value that a source states is left unchanged", () => {
+  const fresh: FreshValue[] = [
+    {
+      claimId: 1,
+      value: "$19/month",
+      url: "https://example.com/pricing",
+      quote: "$19/month",
+      status: "unchanged",
+    },
+  ];
+  const sources = [
+    {
+      title: "Pricing",
+      url: "https://example.com/pricing",
+      content: "Our hosting plan costs $19/month.",
+    },
+  ];
+
+  assert.deepEqual(enforceValueInSources(sources, fresh), fresh);
+});
+
+test("a changed value the sources do not state is also downgraded", () => {
+  const fresh: FreshValue[] = [
+    {
+      claimId: 1,
+      value: "$29/month",
+      url: null,
+      quote: null,
+      status: "changed",
+    },
+  ];
+
+  assert.equal(enforceValueInSources([], fresh)[0].status, "not_found");
+});
+
+test("extraction downgrades an echoed value that no source states", async () => {
+  const claim = c(1, "Postgres hosting", "price", "$19/month", "2026-11-10");
+  const { fresh } = await extractFreshValues(
+    stubLlm({
+      results: [
+        {
+          claimId: 1,
+          value: "$19/month",
+          url: "https://medium.com/hosting",
+          quote: "$19/month",
+          status: "unchanged",
+        },
+      ],
+    }),
+    [claim],
+    [
+      {
+        title: "Hosting prices",
+        url: "https://medium.com/hosting",
+        content: "Some providers are free; see the linked table.",
+      },
+    ]
+  );
+
+  assert.equal(fresh[0].status, "not_found");
+  assert.equal(fresh[0].valueNotInSources, true);
+  assert.match(buildDiff([claim], fresh), /does not appear in any fresh source/);
+});
+
+test("an echoed value leads to an honest re-check answer", async () => {
+  const db = freshDb();
+  const claim = recordClaims(
+    db, "s", [extracted("Postgres hosting", "price", "$19/month")], NOW, IST
+  ).claims[0];
+
+  const llm: Llm = {
+    structured: async <T>() => ({
+      data: {
+        results: [
+          {
+            claimId: claim.id,
+            value: "$19/month",
+            url: "https://medium.com/hosting",
+            quote: "$19/month",
+            status: "unchanged",
+          },
+        ],
+      } as T,
+      usage: NO_USAGE,
+    }),
+    turn: async () => ({
+      text: "No. The price is still $19/month, unchanged since your last Tuesday observation.",
+      stopReason: "answered",
+    }),
+  };
+
+  const report = await recheck({
+    ctx: { db, sessionId: "s", timeZone: IST },
+    intent: { date: "2026-11-17", phrase: "Has any pricing changed" },
+    userText: "Last Tuesday I asked you about Postgres hosting. Has any pricing changed since then?",
+    now: NOW,
+    llm,
+    instructions: "You are a research assistant.",
+    search: async () => [
+      {
+        title: "Hosting prices",
+        url: "https://medium.com/hosting",
+        content: "Some providers are free; see the linked table.",
+      },
+    ],
+    maxSearches: 8,
+  });
+
+  assert.equal(report.fresh[0].status, "not_found");
+  assert.match(report.answer, /could not verify a current value/);
+  assert.doesNotMatch(report.answer, /price is still/);
+  assert.equal(report.writeBack.verifications, 1);
+  db.close();
 });
 
 test("extraction applies the attribute guard and the diff surfaces the mismatch", async () => {

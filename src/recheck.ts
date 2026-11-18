@@ -28,6 +28,8 @@ export type FreshValue = {
   matchedAttribute?: string | null;
   /** Set when the guard downgraded a result because the concepts differ. */
   mismatch?: boolean;
+  /** Set when the reported value appears in none of the fresh sources. */
+  valueNotInSources?: boolean;
 };
 
 /** How many model calls the answer may take: the answer, plus one search retry. */
@@ -75,6 +77,35 @@ export function enforceAttributeMatch(
     if (value.status === "not_found") return value;
 
     return { ...value, status: "not_found" as const, mismatch: true };
+  });
+}
+
+/**
+ * A fresh value is evidence only if a retrieved source actually states it.
+ * The live brief-3 trace showed extraction echoing the recorded "$19/month"
+ * back as "unchanged" while citing an article that never quotes that price —
+ * the model verified the claim against itself. Downgrade any such result to
+ * not_found in code, the same discipline `enforceAttributeMatch` applies to a
+ * concept mismatch and `critic.ts` applies to an invented URL.
+ */
+export function enforceValueInSources(
+  sources: SearchResult[],
+  fresh: FreshValue[]
+): FreshValue[] {
+  // Whitespace-insensitive comparison so "$19 / month" and "$19/month" agree;
+  // everything else is left literal on purpose. A loosely matching value is
+  // worse than a not_found, which the guard turns into an honest answer.
+  const normalise = (text: string): string =>
+    text.toLowerCase().replace(/\s+/g, "");
+  const corpus = normalise(
+    sources.map((source) => `${source.title} ${source.content}`).join("\n")
+  );
+
+  return fresh.map((value) => {
+    if (value.status === "not_found") return value;
+    const stated = normalise(value.value ?? "");
+    if (stated !== "" && corpus.includes(stated)) return value;
+    return { ...value, status: "not_found" as const, valueNotInSources: true };
   });
 }
 
@@ -172,7 +203,8 @@ export async function extractFreshValues(
 
   // Every claim must appear in the diff, even when extraction omitted it.
   const complete = claims.map((claim) => byId.get(claim.id) ?? notFound(claim));
-  return { fresh: enforceAttributeMatch(claims, complete), usage };
+  const matched = enforceAttributeMatch(claims, complete);
+  return { fresh: enforceValueInSources(sources, matched), usage };
 }
 
 export function buildDiff(claims: Claim[], fresh: FreshValue[]): string {
@@ -189,6 +221,12 @@ export function buildDiff(claims: Claim[], fresh: FreshValue[]): string {
     lines.push(`  recorded: ${claim.value} (observed ${claim.localDate})`);
     if (!value || value.status === "not_found") {
       lines.push(`  current: not found in fresh sources — status: not_found`);
+      if (value?.valueNotInSources) {
+        lines.push(
+          "  mismatch: the reported value does not appear in any fresh source — " +
+            "do not treat this as a re-check"
+        );
+      }
       if (value?.mismatch && value.matchedAttribute) {
         lines.push(
           `  mismatch: source describes "${value.matchedAttribute}", ` +

@@ -90,8 +90,11 @@ and "not found" — is written to a `verifications` table, so a fact that was
 re-verified today is not mistaken for one never checked. Set
 `MAX_RECHECK_SEARCHES` (default 8) to bound the fan-out.
 
-"Not found" never becomes "still correct." The answer call is told explicitly
-that an unverified row's recorded value is history, and `unverified.ts` rewrites
+"Not found" never becomes "still correct," and neither does a value whose
+source never stated it: `enforceValueInSources` downgrades an `unchanged` or
+`changed` result to `not_found` when the reported value appears in none of the
+fresh sources, so the model cannot verify a claim against its own echo. The
+answer call is told explicitly that an unverified row's recorded value is history, and `unverified.ts` rewrites
 any sentence that presents it as current into a "could not verify" statement
 that still names the recorded value and its date. Only an explicit hedge ("could
 not verify", "did not confirm") exempts a sentence — a past-tense marker is not

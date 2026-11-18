@@ -20,6 +20,7 @@ having no retrieved source for it.
 | What is rewritten | A sentence that names an unverified value without framing it as a past observation and without saying it could not be verified. It becomes an explicit "could not verify a current value" statement that still names the subject, attribute, recorded value and observed date. |
 | What is kept | Only sentences that explicitly hedge it ("could not verify", "did not confirm", "not found"…). A past-tense marker alone ("recorded", "last Tuesday") is not an exemption: the rewrite preserves the value and date, and the live brief-3 failure mixed a past observation with a current assertion in one sentence. |
 | Hard constraint | The re-check answer call also gets a developer message stating that `not_found` rows are unverified and their values must never be presented as current. |
+| Self-verification | A fresh `unchanged`/`changed` value that appears in none of the retrieved sources is downgraded to `not_found` in code. The live brief-3 trace showed extraction echoing the recorded $19/month as "unchanged" while citing an article that never quoted it. |
 | Trace | The rewrite count and the rewritten sentences appear in the re-check trace. |
 | Eval | Strengthen the existing `brief-3` case rather than adding a 19th case, so the brief's own example is the regression guard. |
 

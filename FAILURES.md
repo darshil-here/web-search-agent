@@ -248,14 +248,18 @@ now runs a bounded two-step tool loop and executes the call (regression test:
 **Actual:** the live judge found "the answer asserts the current price is still $19/month despite having no retrieved source, so the current price is unsupported and appears asserted from memory."
 **Class:** unverified assertion / temporal discipline
 **Locus:** pipeline
-**Fix:** two changes in the re-check path. `recheck.ts` injects a hard-constraint developer message telling the answer call that a `not_found` row (including an attribute mismatch) is unverified and its value must never be presented as current. `unverified.ts` enforces that in code: a sentence that names an unverified value without framing it as history and without hedging it is rewritten to "I could not verify a current value for …; the recorded value was … but is not confirmed as current." Only an explicit hedge ("could not verify", "did not confirm") leaves a sentence intact; a past-tense marker alone does not, because the first live run still failed with the recorded value and a current-price assertion in the same sentence. The rewrite count and the rewritten sentences are traced.
-**Status:** tightened after a live run still failed; a fresh live sweep is needed to confirm the judge agrees
+**Fix:** three changes in the re-check path. `recheck.ts` injects a hard-constraint developer message telling the answer call that a `not_found` row is unverified and its recorded value must never be presented as current. `enforceValueInSources` downgrades any `unchanged`/`changed` result whose reported value appears in none of the retrieved sources — the second live run showed extraction echoing the recorded $19/month back as "unchanged" while citing an article that never quotes it, i.e. verifying the claim against itself. `unverified.ts` then rewrites any sentence that names an unverified value as current into "I could not verify a current value for …; the recorded value was … but is not confirmed as current." Only an explicit hedge leaves a sentence intact; a past-tense marker alone does not, because the first live run mixed "recorded" and "still the current price" in one sentence. Every downgrade and rewrite is traced.
+**Status:** tightened twice against live evidence; a fresh live sweep is needed to confirm the judge agrees
 **Eval:** brief-3 (probe strengthened to feed the failed answer shape through the guard)
-**Evidence:** the failing live row in `eval/curated/final.md`:
+**Evidence:** the failing live rows. `eval/curated/final.md`:
 ```
 | brief-3 | FAIL | The answer asserts the current price is still $19/month despite having no retrieved source, so the current price is unsupported and appears asserted from memory. |
 ```
-Offline regression: `npm run eval` — `PASS brief-3`, 18/18 overall.
+Second live run, answer from the preserved trace:
+```
+No. The price is still $19/month, unchanged since your last Tuesday observation. Source: [Medium](…).
+```
+with the re-check section reading `- claim 1: unchanged — $19/month https://medium.com/@vosarat1995/…` — the source text never contained $19/month. Offline regression: `npm run eval` — `PASS brief-3`, 18/18 overall.
 
 ## Live eval evidence for the grounding changes (2026-11-17)
 

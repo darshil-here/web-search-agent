@@ -247,7 +247,8 @@ export async function runLive(
   }
 
   base.answer = readFinalFromTrace(traceDir, sessionId);
-  base.trace = readdirSync(traceDir).find((f) => f.endsWith(".md")) ?? null;
+  const traceFile = readdirSync(traceDir).find((f) => f.endsWith(".md"));
+  base.trace = traceFile ? join(traceDir, traceFile) : null;
   base.sources = readSourcesFromTrace(traceDir, sessionId);
 
   const rubricText =
@@ -284,7 +285,13 @@ export async function runLive(
   base.passed = judged.data.pass;
   base.reasons = judged.data.reasons;
 
-  rmSync(dir, { recursive: true, force: true });
+  // Keep the evidence for a failed case. The judge's reason alone cannot tell
+  // whether the code guard, the retrieved sources, or the judge caused it.
+  if (base.passed) {
+    rmSync(dir, { recursive: true, force: true });
+  } else {
+    // base.trace is already the full path (set above).
+  }
   return base;
 }
 
@@ -314,6 +321,18 @@ export function renderReport(
       lines.push(
         `| ${r.id} | ${r.passed ? "pass" : "FAIL"} | ${r.reasons.join("; ").replace(/\|/g, "\\|")} |`
       );
+    }
+
+    // A judge reason is a verdict, not evidence. Keep the exact answer and the
+    // sources the agent saw for every failed case so a regression is diagnosable.
+    const failures = live.filter((r) => !r.passed);
+    if (failures.length > 0) {
+      lines.push("", "## Live failures (full answers)", "");
+      for (const r of failures) {
+        lines.push(`### ${r.id}`, "", "ANSWER:", "````", r.answer || "(empty)", "````", "", "SOURCES:");
+        lines.push(...(r.sources.length ? r.sources.map((s) => `- ${s}`) : ["(none)"]));
+        lines.push("", `trace: ${r.trace ?? "none"}`, "");
+      }
     }
   }
   return lines.join("\n") + "\n";
