@@ -59,6 +59,33 @@ test("ground attaches source URLs and marks unsupported statements", async () =>
   assert.doesNotMatch(result.answer, /invented\.test/);
   assert.match(result.answer, /not stated in sources/);
   assert.equal(result.dropped, 1);
+  // The critic's own unsupported flag is enforced in the answer text, not just
+  // counted and accompanied by a vague global note.
+  assert.doesNotMatch(result.answer, /Supabase has 99 GB/);
+  assert.equal(result.replaced.length, 1);
+});
+
+test("ground marks a numeric claim whose value no source states", async () => {
+  const result = await ground(
+    llmReturning({
+      revisedAnswer:
+        "Neon has 10 branches [https://n.test].",
+      statements: [
+        {
+          text: "Neon has 10 branches",
+          url: "https://n.test",
+          supported: true,
+        },
+      ],
+    }),
+    "Neon has 10 branches.",
+    sources,
+    "Compare the free tiers"
+  );
+
+  assert.match(result.answer, /not stated in sources/);
+  assert.doesNotMatch(result.answer, /10 branches/);
+  assert.equal(result.replaced.length, 1);
 });
 
 test("ground appends a no-date note when no source has a date", async () => {

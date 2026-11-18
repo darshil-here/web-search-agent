@@ -261,6 +261,21 @@ No. The price is still $19/month, unchanged since your last Tuesday observation.
 ```
 with the re-check section reading `- claim 1: unchanged — $19/month https://medium.com/@vosarat1995/…` — the source text never contained $19/month. Offline regression: `npm run eval` — `PASS brief-3`, 18/18 overall.
 
+## F-012 — Unsupported numeric values in a grounded table
+**Input:** "Compare the free tiers of Neon and Supabase"
+**Expected:** a table cell whose value no retrieved page states is marked "not stated in sources".
+**Actual:** the live judge repeatedly found such cells stated as facts, e.g. "5 GB Object Storage per project", "2 million Realtime messages/month", "500,000 Edge Function invocations", "10 branches". Each cell carried a valid URL, which is why the URL-stripping fix (F-003) did not catch it.
+**Class:** unsupported synthesis / value grounding
+**Locus:** pipeline
+**Fix:** `support.ts` adds a deterministic value-support guard inside the critic. A numeric claim (number plus its unit) is replaced with "not stated in sources" when no retrieved page states that value. The critic's own `supported: false` flags were already being counted but never rendered; the new guard enforces the same contract in code. It runs before the date-visibility note so publication dates are not graded as claims, is capped at one unit word so synonyms ("100 CU-hours" for "100 compute-hours") do not mark supported values unknown, and records every rewrite in the trace as `critic_replaced`.
+**Status:** fixed in code; the guard is deliberately conservative, so a value attached to a different named feature can still slip through. A live sweep has not been run after this change.
+**Eval:** grounding-001 (probe extended to feed an unsupported cell through the guard)
+**Evidence:** live judge reason from the second run:
+```
+Several table values are not present in the retrieved sources, including Neon's 5 GB egress, 5 GB Object Storage, 60,000 MAUs, one snapshot, and 10 branches.
+```
+Replaying that run's answer through the guard: 20 numeric claims checked, 5 rewritten (including the fabricated "2 million" and "500,000 Edge" quotas), down from 37 before the precision tightening.
+
 ## Live eval evidence for the grounding changes (2026-11-17)
 
 `npm run eval:live` after adding `pages.ts`, `critic.ts`, `source-date.ts` and

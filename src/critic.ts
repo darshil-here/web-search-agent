@@ -5,11 +5,14 @@
 // URLs and marks unsupported claims; the model never gets a new tool.
 import type { Llm, Usage } from "./llm.js";
 import type { EnrichedSource } from "./search.js";
+import { guardValueSupport } from "./support.js";
 
 export type GroundResult = {
   answer: string;
   statements: number;
   dropped: number;
+  /** Values the critic asserted but no retrieved source stated, rewritten in code. */
+  replaced: string[];
   note: string | null;
   error?: string;
   usage: Usage;
@@ -104,6 +107,19 @@ export async function ground(
       revised += "\n\nClaims not stated in sources were marked as such.";
     }
 
+    // The critic's `supported` flags are a hint, not the contract: F-002 showed
+    // it marking unsupported table values as supported. Check each numeric
+    // claim against the retrieved text and replace what no source states.
+    // Runs before the date note so metadata dates are not graded as claims.
+    const support = guardValueSupport(
+      revised,
+      sources.map((source) => ({
+        url: source.url,
+        text: source.pageText ?? source.content,
+      }))
+    );
+    revised = support.answer;
+
     // Always state date visibility. F-006's rubric asks whether the cited
     // source has a visible date, so silence is never an acceptable answer —
     // even when some other source in the set did have one.
@@ -119,6 +135,7 @@ export async function ground(
       answer: revised.trim() || answer,
       statements: (data.statements ?? []).length,
       dropped,
+      replaced: support.replaced,
       note,
       usage,
     };
@@ -127,6 +144,7 @@ export async function ground(
       answer,
       statements: 0,
       dropped: 0,
+      replaced: [],
       note: null,
       error: err instanceof Error ? err.message : String(err),
       usage: { prompt: 0, completion: 0, total: 0 },

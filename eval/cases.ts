@@ -25,6 +25,7 @@ import { buildQueries, enforceAttributeMatch, writeBack } from "../src/recheck.j
 import { extractClaims } from "../src/claims.js";
 import { sameAttribute } from "../src/concepts.js";
 import { guardUnverified } from "../src/unverified.js";
+import { guardValueSupport } from "../src/support.js";
 
 export const IST = "Asia/Kolkata";
 /** Tuesday 17 November 2026, 11:30 IST. */
@@ -361,12 +362,22 @@ export const CASES: EvalCase[] = [
     probe: async (ctx) => {
       const sources = [{ title: "Neon", url: "https://neon.com/pricing", content: "storage" }];
       const { claims } = await extractClaims(ctx.llm, "answer", sources, ctx.question);
-      return { claims };
+      // The live judge's complaint was unsupported table values that carried a
+      // valid URL. Feed that exact shape through the deterministic support guard.
+      const guarded = guardValueSupport(
+        "| Feature | Neon |\n|---|---|\n| Branching | 10 branches [https://neon.com/pricing] |",
+        [{ url: "https://neon.com/pricing", text: "100 projects, 1 GB storage" }]
+      );
+      return { claims, guarded };
     },
     check: (o) => {
       const claims = o.claims as Array<{ url: string | null; value: string; quote: string | null }>;
       if (claims.some((c) => c.url && c.url !== "https://neon.com/pricing")) return "invented URL survived";
       if (claims.some((c) => c.value.length > 300 || (c.quote?.length ?? 0) > 400)) return "unclipped field";
+      const guarded = o.guarded as { answer: string; replaced: string[] };
+      if (guarded.replaced.length !== 1) return "unsupported table value was not marked";
+      if (!guarded.answer.includes("not stated in sources")) return "no unknown marker in the cell";
+      if (guarded.answer.includes("10 branches")) return "unsupported value still asserted";
       return null;
     },
     rubric: {

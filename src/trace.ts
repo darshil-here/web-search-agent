@@ -75,6 +75,7 @@ type Final = {
 export type CriticTrace = {
   statements: number;
   dropped: number;
+  replaced: string[];
   note: string | null;
   error?: string;
 };
@@ -340,6 +341,7 @@ export class Tracer {
       `recheck_rewrites: ${this.recheckInfo?.guard?.rewritten.length ?? 0}`,
       `critic_statements: ${this.criticInfo?.statements ?? 0}`,
       `critic_dropped: ${this.criticInfo?.dropped ?? 0}`,
+      `critic_replaced: ${this.criticInfo?.replaced.length ?? 0}`,
       `scope_removed: ${this.scopeInfo?.removed.length ?? 0}`,
       `calibration_rewrites: ${this.calibrationInfo?.rewritten.length ?? 0}`,
       "tokens:",
@@ -432,11 +434,15 @@ export class Tracer {
         "",
         "## Grounding critic",
         "",
-        "| statements | dropped | note |",
-        "|----------:|--------:|------|",
-        `| ${c.statements} | ${c.dropped} | ${tableCell(c.note ?? "—")} |`,
+        "| statements | dropped | replaced | note |",
+        "|----------:|--------:|---------:|------|",
+        `| ${c.statements} | ${c.dropped} | ${c.replaced.length} | ${tableCell(c.note ?? "—")} |`,
         ""
       );
+      for (const value of c.replaced) {
+        lines.push(`- replaced: ${tableCell(value)}`);
+      }
+      if (c.replaced.length > 0) lines.push("");
       if (c.error) lines.push(`**Critic error:** ${c.error}`, "");
     }
 
