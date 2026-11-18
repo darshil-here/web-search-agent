@@ -111,7 +111,8 @@ domain, `MAX_PAGE_FETCHES` total), publication dates are read from the text, and
 a critic rewrites the answer so every factual claim carries an inline URL from
 the retrieved set. Unsupported claims are marked "not stated in sources".
 `support.ts` then checks each numeric claim (number plus its unit) against the
-retrieved text and replaces values no page states with "not stated in sources";
+source cited beside it and replaces values that page does not state with
+"not stated in sources";
 the count is traced as `critic_replaced`. Simpler answers skip the fetch and
 critic, but every sourced answer still gets a statement of whether the sources
 showed a publication date. Tavily's

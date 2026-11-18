@@ -44,7 +44,23 @@ test("a value present in a source is kept", () => {
   assert.equal(result.answer, answer);
 });
 
-test("a value present in another source is still kept", () => {
+test("a value stated only by a different source is marked unknown", () => {
+  // A URL beside a cell is a claim about where the value came from. If that
+  // source does not state it, another source stating it does not rescue it.
+  const answer =
+    "Neon has 20 GB total [https://neon.test/pricing].";
+  const other = [
+    ...SOURCES,
+    { url: "https://other.test", text: "Neon offers 20 GB total storage." },
+  ];
+
+  const result = guardValueSupport(answer, other);
+
+  assert.equal(result.replaced.length, 1);
+  assert.match(result.answer, /not stated in sources/);
+});
+
+test("a cited source with the value is kept even if no other source has it", () => {
   const answer = "The free tier includes 5 GB egress [https://supabase.test/pricing].";
 
   assert.deepEqual(guardValueSupport(answer, SOURCES).replaced, []);

@@ -35,6 +35,7 @@ const STOP = new Set([
 ]);
 
 const MARKER = "not stated in sources";
+const URL = /https?:\/\/[^\s)\]|,]+/g;
 
 function normalise(text: string): string {
   return flatten(text).replace(/\*/g, "").toLowerCase().replace(/\s+/g, "");
@@ -62,20 +63,25 @@ function checkable(raw: string): boolean {
   return /[A-Za-z$]/.test(raw) || raw.includes(".");
 }
 
-/**
- * Replace every numeric claim absent from all retrieved sources with a marker.
- * Values that a source states, values present in any source, and non-numeric
- * prose are left exactly as they are. Markdown structure is preserved because
- * only the matched value span is replaced.
- */
-export function guardValueSupport(
-  answer: string,
-  sources: SupportSource[]
-): SupportResult {
-  const corpus = sources.map((source) => normalise(source.text)).join(" ");
-  if (corpus.trim() === "") return { answer, replaced: [], checked: 0 };
+function guardLine(
+  line: string,
+  sources: SupportSource[],
+  byUrl: Map<string, string>
+): { answer: string; replaced: string[]; checked: number } {
+  // A URL beside a claim names its source. Grade the value against that source,
+  // not against whatever another vendor's page happens to say. If the line
+  // cites a URL we did not retrieve, fall back to the whole set: we cannot
+  // judge that citation, so do not silently discard its value either.
+  const cited = [...line.matchAll(URL)].map((match) => match[0]);
+  const known = cited.filter((url) => byUrl.has(url));
+  const corpus = (
+    known.length ? known.map((url) => byUrl.get(url)!) : sources.map((s) => s.text)
+  )
+    .map(normalise)
+    .join(" ");
+  if (corpus.trim() === "") return { answer: line, replaced: [], checked: 0 };
 
-  const matches = [...answer.matchAll(MEASURE)]
+  const matches = [...line.matchAll(MEASURE)]
     .filter((match) => checkable(match[0]))
     .map((match) => {
       const raw = measureValue(match[0]);
@@ -83,7 +89,7 @@ export function guardValueSupport(
     });
 
   const replaced: string[] = [];
-  let result = answer;
+  let result = line;
 
   // Work back to front so earlier indices stay valid as the string changes.
   for (const match of matches.reverse()) {
@@ -94,4 +100,28 @@ export function guardValueSupport(
   }
 
   return { answer: result, replaced: replaced.reverse(), checked: matches.length };
+}
+
+/**
+ * Replace every numeric claim whose cited source does not state its value with
+ * a marker. Works line by line, so a table cell is graded against the URLs in
+ * that cell rather than against the whole retrieved set. Markdown structure is
+ * preserved because only the matched value span is replaced.
+ */
+export function guardValueSupport(
+  answer: string,
+  sources: SupportSource[]
+): SupportResult {
+  const byUrl = new Map(sources.map((source) => [source.url, source.text]));
+  const lines = answer.split("\n");
+  const replaced: string[] = [];
+  let checked = 0;
+  const kept = lines.map((line) => {
+    const result = guardLine(line, sources, byUrl);
+    replaced.push(...result.replaced);
+    checked += result.checked;
+    return result.answer;
+  });
+
+  return { answer: kept.join("\n"), replaced, checked };
 }
