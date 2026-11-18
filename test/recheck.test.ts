@@ -12,9 +12,11 @@ import {
 import { recordClaims } from "../src/claims.js";
 import type { Llm, PromptMessage, TurnRequest, Usage } from "../src/llm.js";
 import {
+  buildChangeQueries,
   buildQueries,
   extractFreshValues,
   buildDiff,
+  renderDiffAnswer,
   writeBack,
   recheck,
   enforceAttributeMatch,
@@ -70,6 +72,22 @@ test("buildQueries makes one query per distinct subject", () => {
   assert.match(queries[0], /storage/);
 });
 
+test("buildChangeQueries makes one change query per subject with the date", () => {
+  const queries = buildChangeQueries(
+    [
+      c(1, "HubSpot", "price", "$20/seat", "2026-11-16"),
+      c(2, "HubSpot", "free tier", "yes", "2026-11-16"),
+      c(3, "Salesforce", "price", "$25/seat", "2026-11-16"),
+    ],
+    "2026-11-16"
+  );
+
+  assert.equal(queries.length, 2);
+  assert.match(queries[0], /HubSpot/);
+  assert.match(queries[0], /changelog/);
+  assert.match(queries[0], /2026-11-16/);
+});
+
 test("extraction maps results to claims and strips invented URLs", async () => {
   const claims = [c(1, "Neon free tier", "storage", "10 GB", "2026-11-03")];
   const { fresh } = await extractFreshValues(
@@ -97,6 +115,68 @@ test("extraction maps results to claims and strips invented URLs", async () => {
   assert.equal(fresh.length, 1);
   assert.equal(fresh[0].value, "512 MB");
   assert.equal(fresh[0].url, "https://neon.com/pricing");
+});
+
+test("a notable change is extracted, diffed and rendered", async () => {
+  const claims = [c(1, "Neon free tier", "storage", "10 GB", "2026-11-03")];
+  const { fresh } = await extractFreshValues(
+    stubLlm({
+      results: [
+        {
+          claimId: 1,
+          value: "512 MB",
+          url: "https://neon.com/pricing",
+          quote: "512 MB storage free",
+          status: "changed",
+          notableChange: {
+            description: "Storage moved to 512 MB",
+            url: "https://neon.com/pricing",
+            quote: "512 MB storage free",
+            date: "2026-11-03",
+          },
+        },
+      ],
+    }),
+    claims,
+    SOURCES
+  );
+
+  assert.equal(fresh[0].notableChange?.description, "Storage moved to 512 MB");
+  assert.match(buildDiff(claims, fresh), /notable change: Storage moved to 512 MB/);
+  const fallback = renderDiffAnswer(claims, fresh, "2026-11-03");
+  assert.match(fallback, /Notable changes in fresh sources/);
+  assert.match(fallback, /Storage moved to 512 MB/);
+});
+
+test("the deterministic fallback lists every claim and keeps history honest", () => {
+  const claims = [
+    c(1, "HubSpot", "price", "$20/seat", "2026-11-16"),
+    c(2, "Salesforce", "price", "$25/seat", "2026-11-16"),
+  ];
+  const fresh: FreshValue[] = [
+    {
+      claimId: 1,
+      value: "",
+      url: null,
+      quote: null,
+      status: "not_found",
+      valueNotInSources: true,
+    },
+    {
+      claimId: 2,
+      value: "$29/seat",
+      url: "https://salesforce.com/pricing",
+      quote: "$29/seat",
+      status: "changed",
+    },
+  ];
+
+  const answer = renderDiffAnswer(claims, fresh, "2026-11-16");
+
+  assert.match(answer, /HubSpot \/ price: could not verify a current value/);
+  assert.match(answer, /\$20\/seat/);
+  assert.match(answer, /Salesforce \/ price: changed to \$29\/seat/);
+  assert.doesNotMatch(answer, /current value is still \$20/);
 });
 
 test("a claim with no extraction row becomes not_found", async () => {
@@ -206,7 +286,7 @@ test("unchanged writes only a verification; not_found leaves the claim open", ()
 
 // --- orchestration ----------------------------------------------------------
 
-test("an empty answer text is reported as an incomplete re-check", async () => {
+test("an empty answer text falls back to a deterministic re-check answer", async () => {
   const db = freshDb();
   const claim = recordClaims(
     db, "s", [extracted("A", "price", "$10")], NOW, IST
@@ -238,8 +318,12 @@ test("an empty answer text is reported as an incomplete re-check", async () => {
     ],
   });
 
-  assert.equal(report.stopReason, "budget");
-  assert.match(report.answer, /without an answer/);
+  // The diff is already computed, so an empty model reply must still produce
+  // the answer a human would have seen at the CLI (F-013).
+  assert.equal(report.stopReason, "answered");
+  assert.equal(report.answerKind, "fallback");
+  assert.match(report.answer, /A \/ price: unchanged at \$10/);
+  assert.ok(report.errors.answer);
   db.close();
 });
 
@@ -284,7 +368,11 @@ test("recheck falls back to open claims when the named date is empty", async () 
   });
 
   assert.equal(report.claimsChecked, 1);
-  assert.equal(searches.length, 1);
+  // One attribute query plus one change query: "still correct" also needs
+  // release notes, not just the page that held the old value.
+  assert.equal(searches.length, 2);
+  assert.match(searches[0], /latest LTS release/);
+  assert.match(searches[1], /changelog|release notes/);
   assert.equal(report.fresh[0].status, "unchanged");
   assert.equal(report.writeBack.verifications, 1);
   assert.equal(report.stopReason, "answered");
@@ -489,11 +577,12 @@ test("an all-unverified re-check disables the answer call's search tool", async 
   db.close();
 });
 
-test("a partially verified re-check keeps the search safety valve", async () => {
+test("the answer call never re-searches, however many rows are verified", async () => {
   const db = freshDb();
   const a = recordClaims(db, "s", [extracted("A", "price", "$10")], NOW, IST).claims[0];
   recordClaims(db, "s", [extracted("B", "price", "$20")], NOW, IST);
   let useTools: boolean | undefined;
+  let maxSteps: number | undefined;
 
   const llm: Llm = {
     structured: async <T>() => ({
@@ -512,6 +601,7 @@ test("a partially verified re-check keeps the search safety valve", async () => 
     }),
     turn: async (request: TurnRequest) => {
       useTools = request.useTools;
+      maxSteps = request.maxSteps;
       return { text: "A is unchanged; B could not be verified.", stopReason: "answered" };
     },
   };
@@ -527,7 +617,11 @@ test("a partially verified re-check keeps the search safety valve", async () => 
     maxSearches: 8,
   });
 
-  assert.equal(useTools, true);
+  // The brief-1 live failure: the answer call spent its steps searching again
+  // and returned nothing. Per-subject searches already ran, so the answer is
+  // written from the diff in a single no-tool call.
+  assert.equal(useTools, false);
+  assert.equal(maxSteps, 1);
   db.close();
 });
 

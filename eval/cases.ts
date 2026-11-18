@@ -21,7 +21,12 @@ import {
 import { buildNotebook } from "../src/notebook.js";
 import { parseDateRefs } from "../src/dates.js";
 import { detectRecheck } from "../src/detect.js";
-import { buildQueries, enforceAttributeMatch, writeBack } from "../src/recheck.js";
+import {
+  buildChangeQueries,
+  buildQueries,
+  enforceAttributeMatch,
+  writeBack,
+} from "../src/recheck.js";
 import { extractClaims } from "../src/claims.js";
 import { sameAttribute } from "../src/concepts.js";
 import { guardUnverified } from "../src/unverified.js";
@@ -136,13 +141,23 @@ export const CASES: EvalCase[] = [
     probe: (ctx) => {
       const intent = detectRecheck(ctx.question, ctx.now, ctx.timeZone);
       const claims = claimsForDate(ctx.db, ctx.sessionId, "2026-11-16");
-      return { intent, claims: claims.length, queries: buildQueries(claims) };
+      return {
+        intent,
+        claims: claims.length,
+        queries: buildQueries(claims),
+        changeQueries: buildChangeQueries(claims, "2026-11-16"),
+      };
     },
     check: (o) => {
       const intent = o.intent as ReturnType<typeof detectRecheck>;
       if (intent?.date !== "2026-11-16") return `date ${intent?.date}`;
       if (o.claims !== 5) return `claims ${o.claims}`;
       if ((o.queries as string[]).length !== 5) return "expected one query per vendor";
+      const changeQueries = o.changeQueries as string[];
+      if (changeQueries.length !== 5) return "expected one change query per vendor";
+      if (!changeQueries.every((query) => query.includes("2026-11-16"))) {
+        return "change query does not name the observation date";
+      }
       return null;
     },
     rubric: {

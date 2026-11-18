@@ -17,6 +17,14 @@ import { guardUnverified } from "./unverified.js";
 
 export type FreshStatus = "changed" | "unchanged" | "not_found";
 
+/** A sourced product/feature change reported by extraction, if the sources state one. */
+export type NotableChange = {
+  description: string;
+  url: string | null;
+  quote: string | null;
+  date: string | null;
+};
+
 export type FreshValue = {
   claimId: number;
   value: string;
@@ -26,14 +34,13 @@ export type FreshValue = {
   /** The concept the source actually describes, reported by extraction and
    * checked against the recorded attribute in code. */
   matchedAttribute?: string | null;
+  /** A product or feature change since the observation, not a new price. */
+  notableChange?: NotableChange | null;
   /** Set when the guard downgraded a result because the concepts differ. */
   mismatch?: boolean;
   /** Set when the reported value appears in none of the fresh sources. */
   valueNotInSources?: boolean;
 };
-
-/** How many model calls the answer may take: the answer, plus one search retry. */
-const ANSWER_STEPS = 2;
 
 // The diff tells the model what is unknown; this tells it what that means. A
 // second developer message rather than a global prompt rule, so the constraint
@@ -53,6 +60,25 @@ export function buildQueries(claims: Claim[]): string[] {
     if (seen.has(claim.subject)) continue;
     seen.add(claim.subject);
     out.push(`${claim.subject} ${claim.attribute}`.trim());
+  }
+  return out;
+}
+
+/**
+ * The second half of a re-check. "Has anything changed?" is not only a price
+ * question: brief-1 also asks whether a vendor "shipped something big". One
+ * change query per subject gives the extractor a chance to see release notes,
+ * not just the pricing page.
+ */
+export function buildChangeQueries(claims: Claim[], date: string): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const claim of claims) {
+    if (seen.has(claim.subject)) continue;
+    seen.add(claim.subject);
+    out.push(
+      `${claim.subject} changelog OR release notes OR new features since ${date}`
+    );
   }
   return out;
 }
@@ -122,6 +148,13 @@ ${SIBLING_CONCEPTS}. If the sources describe a different attribute than the
 recorded one, set status to not_found and report what they did describe in
 matchedAttribute.
 
+Also set notableChange for the subject when the sources state a product, feature,
+packaging or pricing-structure change that happened after the observed date.
+Use only the sources. Give an exact URL and a short verbatim quote; set date to
+the date the source states, or null. If the sources show no such change, set
+notableChange to null. A different price is already reported in status/value;
+do not repeat it as a notable change unless the source describes it as a change.
+
 Return one result per claim id given. Use only values stated in the sources.
 Use an exact source URL from the sources, or null. Never invent a URL.`;
 
@@ -139,8 +172,32 @@ const FRESH_SCHEMA = {
           quote: { anyOf: [{ type: "string" }, { type: "null" }] },
           status: { type: "string", enum: ["changed", "unchanged", "not_found"] },
           matchedAttribute: { anyOf: [{ type: "string" }, { type: "null" }] },
+          notableChange: {
+            anyOf: [
+              {
+                type: "object",
+                properties: {
+                  description: { type: "string" },
+                  url: { anyOf: [{ type: "string" }, { type: "null" }] },
+                  quote: { anyOf: [{ type: "string" }, { type: "null" }] },
+                  date: { anyOf: [{ type: "string" }, { type: "null" }] },
+                },
+                required: ["description", "url", "quote", "date"],
+                additionalProperties: false,
+              },
+              { type: "null" },
+            ],
+          },
         },
-        required: ["claimId", "value", "url", "quote", "status", "matchedAttribute"],
+        required: [
+          "claimId",
+          "value",
+          "url",
+          "quote",
+          "status",
+          "matchedAttribute",
+          "notableChange",
+        ],
         additionalProperties: false,
       },
     },
@@ -193,11 +250,30 @@ export async function extractFreshValues(
 
   for (const result of data.results ?? []) {
     if (!recordedIds.has(result.claimId)) continue;
+    // A change is only evidence if it carries a source we actually retrieved;
+    // the same URL rule that applies to a fresh value applies here.
+    const change = result.notableChange
+      ? {
+          description: clip(result.notableChange.description ?? "", CLAIM_LIMITS.value),
+          url:
+            result.notableChange.url && allowed.has(result.notableChange.url)
+              ? result.notableChange.url
+              : null,
+          quote: result.notableChange.quote
+            ? clip(result.notableChange.quote, CLAIM_LIMITS.quote)
+            : null,
+          date: result.notableChange.date
+            ? clip(result.notableChange.date, 40)
+            : null,
+        }
+      : null;
+
     byId.set(result.claimId, {
       ...result,
       value: clip(result.value ?? "", CLAIM_LIMITS.value),
       quote: result.quote ? clip(result.quote, CLAIM_LIMITS.quote) : null,
       url: result.url && allowed.has(result.url) ? result.url : null,
+      ...(change && change.description ? { notableChange: change } : {}),
     });
   }
 
@@ -237,9 +313,83 @@ export function buildDiff(claims: Claim[], fresh: FreshValue[]): string {
       lines.push(`  current: ${value.value} (${value.status})`);
       if (value.url) lines.push(`  source: ${value.url}`);
     }
+    if (value?.notableChange?.description) {
+      const change = value.notableChange;
+      lines.push(
+        `  notable change: ${change.description}` +
+          `${change.date ? ` (${change.date})` : ""}` +
+          `${change.url ? ` — ${change.url}` : ""}`
+      );
+    }
     lines.push("");
   }
   lines.push("</recheck-diff>");
+  return lines.join("\n");
+}
+
+/**
+ * The deterministic answer of last resort. The model writes the prose when it
+ * can; this renders the same diff when it returns nothing or runs out of steps.
+ * It never presents a not_found value as current, so the F-011 contract holds
+ * even when the model is unavailable.
+ */
+export function renderDiffAnswer(
+  claims: Claim[],
+  fresh: FreshValue[],
+  date: string
+): string {
+  const byId = new Map(fresh.map((value) => [value.claimId, value]));
+  const lines = [
+    `I re-checked the claims recorded for ${date} against fresh sources.`,
+  ];
+  const changes: string[] = [];
+  const seenChanges = new Set<string>();
+
+  for (const claim of claims) {
+    const value = byId.get(claim.id);
+    const label = `${claim.subject} / ${claim.attribute}`;
+
+    if (!value || value.status === "not_found") {
+      const why = value?.valueNotInSources
+        ? "the reported value did not appear in any fresh source"
+        : value?.mismatch
+          ? `fresh sources described ${value.matchedAttribute ?? "a different attribute"}`
+          : "no fresh source stated it";
+      lines.push(
+        `- ${label}: could not verify a current value (${why}). ` +
+          `The recorded value was ${claim.value} (observed ${claim.localDate}).`
+      );
+    } else if (value.status === "unchanged") {
+      lines.push(
+        `- ${label}: unchanged at ${value.value}` +
+          `${value.url ? ` (${value.url})` : " (source URL not reported)"}.`
+      );
+    } else {
+      lines.push(
+        `- ${label}: changed to ${value.value}` +
+          `${value.url ? ` (${value.url})` : " (source URL not reported)"}; ` +
+          `previously ${claim.value} (observed ${claim.localDate}).`
+      );
+    }
+
+    const change = value?.notableChange;
+    if (change?.description) {
+      const key = `${claim.subject}|${change.description}`.toLowerCase();
+      if (!seenChanges.has(key)) {
+        seenChanges.add(key);
+        changes.push(
+          `- ${claim.subject}: ${change.description}` +
+            `${change.date ? ` (${change.date})` : ""}` +
+            `${change.url ? ` — ${change.url}` : ""}`
+        );
+      }
+    }
+  }
+
+  if (changes.length > 0) {
+    lines.push("", "Notable changes in fresh sources:", "", ...changes);
+  }
+
   return lines.join("\n");
 }
 
@@ -311,8 +461,12 @@ export function writeBack(
   })();
 }
 
+export type AnswerKind = "model" | "fallback";
+
 export type RecheckReport = {
   answer: string;
+  /** "model" when the answer call wrote it; "fallback" when code rendered the diff. */
+  answerKind: AnswerKind;
   stopReason: StopReason;
   intent: RecheckIntent;
   queries: string[];
@@ -321,12 +475,14 @@ export type RecheckReport = {
   writeBack: WriteBackResult;
   usedSearch: boolean;
   fresh: FreshValue[];
+  /** The sources the re-check actually searched, for the trace and the judge. */
+  sources: SearchResult[];
   /** Sentences that presented an unverified value as current, rewritten in code. */
   guard: { rewritten: string[] };
   /** Every model call the re-check made, for the trace. */
   llmCalls: LlmCall[];
   /** Things that went wrong but did not stop the answer. */
-  errors: { extraction?: string; writeBack?: string };
+  errors: { extraction?: string; writeBack?: string; answer?: string };
 };
 
 function newReport(
@@ -335,6 +491,7 @@ function newReport(
 ): RecheckReport {
   return {
     answer: "",
+    answerKind: "fallback",
     stopReason: "answered",
     intent,
     queries: [],
@@ -343,6 +500,7 @@ function newReport(
     writeBack: { inserted: 0, superseded: 0, verifications: 0 },
     usedSearch: false,
     fresh: [],
+    sources: [],
     guard: { rewritten: [] },
     llmCalls: [],
     errors: {},
@@ -371,21 +529,29 @@ export async function recheck(args: {
 
   const dated = claimsForDate(ctx.db, ctx.sessionId, intent.date);
   const claims = dated.length > 0 ? dated : openClaims(ctx.db, ctx.sessionId);
-  const queries = buildQueries(claims);
+  const attributeQueries = buildQueries(claims);
+  const changeQueries = buildChangeQueries(claims, intent.date);
 
-  if (claims.length === 0 || queries.length === 0) {
+  if (claims.length === 0 || attributeQueries.length === 0) {
     return newReport(intent, {
       answer: `I have no prior claim recorded for ${intent.date}, so there is nothing to re-check.`,
     });
   }
 
-  // Bound the fan-out: a 20-subject question must not fire 20 searches.
-  const cappedQueries = queries.slice(0, maxSearches);
+  // Bound the fan-out: a 20-subject question must not fire 40 searches. Price
+  // queries come first so freshness is never starved of the recorded attribute.
+  const queries = [...attributeQueries, ...changeQueries].slice(0, maxSearches);
 
   const settled = await Promise.all(
-    cappedQueries.map(async (query) => {
+    queries.map(async (query, index) => {
+      // Keep the extraction prompt bounded: three hits per recorded claim, two
+      // per change query. A change hit is a lead, not a fact to grade.
+      const limit = index < attributeQueries.length ? 3 : 2;
       try {
-        return { ok: true as const, results: await search(query) };
+        return {
+          ok: true as const,
+          results: (await search(query)).slice(0, limit),
+        };
       } catch {
         return { ok: false as const, results: [] as SearchResult[] };
       }
@@ -428,10 +594,10 @@ export async function recheck(args: {
 
   const diff = buildDiff(claims, fresh);
 
-  if (failedSearches === cappedQueries.length) {
+  if (failedSearches === queries.length) {
     return newReport(intent, {
       answer: "I could not complete the re-check: every web search failed.",
-      queries: cappedQueries,
+      queries,
       claimsChecked: claims.length,
       failedSearches,
       fresh,
@@ -454,14 +620,12 @@ export async function recheck(args: {
     instructions,
     input,
     search,
-    toolDescription:
-      "Search the web. Use only if the diff leaves something unverified.",
-    maxSteps: ANSWER_STEPS,
-    // When every row is unverified, another search cannot help: the per-subject
-    // searches already ran and found no stated value. Removing the tool stops
-    // the model from spending its step budget and returning an empty answer
-    // (the brief-1 live failure).
-    useTools: fresh.some((value) => value.status !== "not_found"),
+    toolDescription: "Search the web. Not used on a re-check.",
+    // The per-subject searches already ran. Letting the answer call search
+    // again let the model spend its whole budget searching instead of writing
+    // (the brief-1 live failure), so the answer is written from the diff only.
+    maxSteps: 1,
+    useTools: false,
     onEvent: (event) => {
       if (event.type === "llm") llmCalls.push(event.call);
       if (event.type === "tool") usedSearch = true;
@@ -503,26 +667,34 @@ export async function recheck(args: {
       localDate: claim.localDate,
     }));
 
-  // A model can say "answered" with empty text. Treat that as the failure it
-  // is rather than handing the user a blank reply (the F-009 lesson).
+  // A model can say "answered" with empty text, or can exhaust its one step
+  // without writing. Either way the diff is already computed: render it in code
+  // rather than handing the user a blank reply or a "try again" (F-009/F-013).
   const empty = turn.text.trim() === "";
   const failed = turn.stopReason === "budget" || empty;
+  if (failed) {
+    errors.answer =
+      "the answer model returned no text; the re-check diff was rendered in code";
+  }
   const guarded = failed
-    ? { answer: "", rewritten: [] as string[] }
+    ? { answer: renderDiffAnswer(claims, fresh, intent.date), rewritten: [] as string[] }
     : guardUnverified(turn.text, unverified);
 
   return newReport(intent, {
-    answer: failed
-      ? `I stopped while writing the re-check for ${intent.date} without an answer. ` +
-        `Try asking again, or ask about one claim at a time.`
-      : guarded.answer,
-    stopReason: failed ? "budget" : turn.stopReason,
-    queries: cappedQueries,
+    answer: guarded.answer,
+    answerKind: failed ? "fallback" : "model",
+    stopReason: "answered",
+    queries,
     claimsChecked: claims.length,
     failedSearches,
     writeBack: writeBackResult,
     usedSearch,
     fresh,
+    // Bounded in the trace, same as a tool result: evidence, not a payload.
+    sources: sources.map((source) => ({
+      ...source,
+      content: source.content.slice(0, 2000),
+    })),
     guard: { rewritten: guarded.rewritten },
     llmCalls,
     errors,

@@ -21,7 +21,7 @@ test("the required keys are read and the rest default", () => {
   assert.equal(config.dbPath, "data/agent.db");
   assert.equal(config.tracesDir, "traces");
   assert.equal(config.maxSteps, 5);
-  assert.equal(config.maxRecheckSearches, 8);
+  assert.equal(config.maxRecheckSearches, 12);
   assert.equal(config.maxPageFetches, 6);
 });
 

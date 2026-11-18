@@ -6,7 +6,7 @@ import { loadConfig } from "./config.js";
 import { appendTurn, openDb, type SessionContext } from "./db.js";
 import { extractClaims, recordClaims } from "./claims.js";
 import { detectRecheck } from "./detect.js";
-import { recheck } from "./recheck.js";
+import { recheck, type AnswerKind } from "./recheck.js";
 import { describeNow } from "./dates.js";
 import { buildNotebook } from "./notebook.js";
 import { createLlm, type StopReason, type ToolCall } from "./llm.js";
@@ -144,11 +144,15 @@ function conclude(
   stopReason: StopReason,
   steps: number,
   runStart: number,
-  now: Date
+  now: Date,
+  answerKind: AnswerKind
 ): { answer: string; stopReason: StopReason } {
+  // Trace what the user actually saw, not an empty string. A fallback or a
+  // budget message is evidence; the verdict and stopReason still say it failed.
   tracer.final({
     steps,
-    content: stopReason === "answered" ? answer : "",
+    content: answer,
+    answerKind,
     totalMs: performance.now() - runStart,
     stopReason,
   });
@@ -223,8 +227,8 @@ async function turn(
       for (const call of report.llmCalls) tracer.llmCall(call);
       tracer.recheck(report);
       tracer.log(
-        report.stopReason === "budget"
-          ? `\nFINAL (incomplete):\n${report.answer}`
+        report.answerKind === "fallback"
+          ? `\nRECHECK (${report.intent.date}, code-written answer):\n${report.answer}`
           : `\nRECHECK (${report.intent.date}):\n${report.answer}`
       );
 
@@ -235,7 +239,8 @@ async function turn(
         report.stopReason,
         report.llmCalls.length,
         runStart,
-        now
+        now,
+        report.answerKind
       );
     }
 
@@ -282,7 +287,16 @@ async function turn(
     if (result.stopReason === "budget") {
       const answer = budgetAnswer(searches, config.maxSteps);
       tracer.log("\nFINAL (incomplete):\n" + answer);
-      return conclude(ctx, tracer, answer, "budget", modelCalls, runStart, now);
+      return conclude(
+        ctx,
+        tracer,
+        answer,
+        "budget",
+        modelCalls,
+        runStart,
+        now,
+        "fallback"
+      );
     }
 
     // Freshness is a retrieval decision: the model can only prefer a current
@@ -351,7 +365,16 @@ async function turn(
       await ledger(ctx, tracer, scoped.answer, sources, now, userText);
     }
 
-    return conclude(ctx, tracer, scoped.answer, "answered", modelCalls, runStart, now);
+    return conclude(
+      ctx,
+      tracer,
+      scoped.answer,
+      "answered",
+      modelCalls,
+      runStart,
+      now,
+      "model"
+    );
   } catch (err) {
     tracer.error({ message: message(err) });
     throw err;

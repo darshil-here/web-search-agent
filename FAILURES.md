@@ -36,7 +36,7 @@ After (`2026-11-17`, prompt version `43209452`):
 `/extract`; `critic.ts` rewrites the answer so every factual claim carries an
 inline URL from the retrieved set, and marks unsupported cells "not stated in
 sources". Both phases appear in the trace.
-**Status:** fixed
+**Status:** partially fixed. The critic and code guard reduce unsupported breadth, but the live sweep on 2026-11-18 still failed `grounding-001`: the judge found the Supabase Compute cell asserting "500 MB RAM" that no retrieved source states. The remaining gap is value-level support for table cells, tracked as F-012.
 **Eval:** grounding-001
 **Evidence:** two searches, then a table with cells no snippet supports —
 ```
@@ -57,7 +57,7 @@ sources". Both phases appear in the trace.
 **Fix:** `critic.ts` returns one statement per factual claim with the URL used;
 code strips any URL not in the retrieved set. Tables get a URL in the relevant
 cell, not a sources list at the bottom.
-**Status:** fixed
+**Status:** fixed for URL attribution: only retrieved URLs survive, and each statement carries one. The live `citation-001` case still failed on 2026-11-18, but for a different reason: the attached URL did not state the numbers beside it ("1 GB Postgres storage", "20 GB across projects"). URL attribution is closed; value support is F-012.
 **Eval:** citation-001
 **Evidence:**
 ```
@@ -239,8 +239,10 @@ correct" over a `not_found` row — is closed by F-011.
 
 Also fixed while here: the answer call's `web_search` safety valve was declared
 but never executed, so a tool request produced an empty answer. `recheck.ts`
-now runs a bounded two-step tool loop and executes the call (regression test:
-"an answer call that requests a search gets it executed").
+briefly ran a bounded two-step tool loop and executed the call. That loop was
+itself the cause of F-013 (it let the model spend both steps searching and
+return nothing), so the final design removes the tool from the answer call
+entirely and renders the diff in code when the model writes nothing.
 
 ## F-011 — An unverified value was asserted as current
 **Input:** "Last Tuesday I asked you about Postgres hosting. Has any pricing changed since then?" (brief example 3)
@@ -249,7 +251,7 @@ now runs a bounded two-step tool loop and executes the call (regression test:
 **Class:** unverified assertion / temporal discipline
 **Locus:** pipeline
 **Fix:** four changes in the re-check path. `recheck.ts` injects a hard-constraint developer message telling the answer call that a `not_found` row is unverified and its recorded value must never be presented as current. `enforceValueInSources` downgrades any `unchanged`/`changed` result whose reported value appears in none of the retrieved sources — the second live run showed extraction echoing the recorded $19/month back as "unchanged" while citing an article that never quotes it, i.e. verifying the claim against itself. `unverified.ts` then rewrites any sentence that names an unverified value as current into "I could not verify a current value for …; the recorded value was … but is not confirmed as current." A sentence is rewritten only when it asserts currency ("still", "current", "unchanged", "now"…); an explicit hedge, or a sentence that merely mentions the value in the past, survives. The second tightening was needed because the first made brief-2 fail by rewriting away the recalled question. Finally, when every row is unverified the answer call's tool is removed (`useTools: false`): the per-subject searches already ran, and letting the model search again made brief-1 return an empty answer. Every downgrade and rewrite is traced.
-**Status:** closed for brief-3 by a live sweep (8/12 overall on that run; brief-1 and brief-2 were transient failures from the two issues above, both fixed afterwards and covered by new tests). A final live sweep has not been run after those last two fixes.
+**Status:** closed for brief-3 by a live sweep (8/12 overall on that run; brief-1 and brief-2 were transient failures from the two issues above, both fixed afterwards and covered by new tests). A later live sweep then exposed a new failure in the same path — brief-1 returning an empty answer because the answer call spent its step budget searching — which is recorded and fixed separately as F-013.
 **Eval:** brief-3 (probe strengthened to feed the failed answer shape through the guard)
 **Evidence:** the failing live rows. `eval/curated/final.md`:
 ```
@@ -268,13 +270,39 @@ with the re-check section reading `- claim 1: unchanged — $19/month https://me
 **Class:** unsupported synthesis / value grounding
 **Locus:** pipeline
 **Fix:** `support.ts` adds a deterministic value-support guard inside the critic. A numeric claim (number plus its unit) is replaced with "not stated in sources" when the source cited beside it does not state that value — checking all sources let a wrong citation survive ("20 GB total" cited to Neon while another page mentioned 20 GB). The critic's own `supported: false` flags were already being counted but never rendered; the new guard enforces the same contract in code. It runs before the date-visibility note so publication dates are not graded as claims, is capped at one unit word so synonyms ("100 CU-hours" for "100 compute-hours") do not mark supported values unknown, and records every rewrite in the trace as `critic_replaced`.
-**Status:** fixed in code and replayed against two real failing answers. A targeted live sweep after the first version still failed on "20 GB total", which the per-citation version now catches; a further live sweep has not been run.
-**Eval:** grounding-001 (probe extended to feed an unsupported cell through the guard)
+**Status:** open. The numeric guard catches values that appear in none of the cited text, and that closed several earlier failures, but the live sweep on 2026-11-18 still failed both `grounding-001` (unsupported "500 MB RAM") and `citation-001` ("1 GB Postgres storage" / "20 GB across projects" beside a URL that states neither). The guard checks a number plus one unit word and misses these phrasings; quote-level support is the next fix.
+**Eval:** grounding-001 and citation-001 (probes replay unsupported cells through the guard)
 **Evidence:** live judge reason from the second run:
 ```
 Several table values are not present in the retrieved sources, including Neon's 5 GB egress, 5 GB Object Storage, 60,000 MAUs, one snapshot, and 10 branches.
 ```
 Replaying that run's answer through the guard: 20 numeric claims checked, 5 rewritten (including the fabricated "2 million" and "500,000 Edge" quotas), down from 37 before the precision tightening.
+
+## F-013 — A re-check spent its answer budget searching, then returned nothing
+
+**Date:** 2026-11-18
+**Input:** brief-1 — "On Monday we shortlisted 5 CRM tools for a 20-person sales team. Has any of them changed pricing or shipped something big since?"
+**Expected:** a per-vendor answer saying what changed and what could not be verified.
+**Actual:** five per-subject searches ran, extraction returned four `not_found` and one `changed`, then the answer call spent both of its steps on more searches. The CLI printed "I stopped while writing the re-check for 2026-11-16 without an answer", and — worse — the trace recorded `content: ""`, so the live judge graded an empty answer and a script could not see what the user saw.
+**Class:** budget exhaustion / silent failure
+**Locus:** `recheck.ts` (answer call), `agent.ts` (`conclude`)
+**Fix:** three changes. (1) The answer call is now a single call with `useTools: false`: the per-subject searches already ran, so another search cannot add evidence and only consumes the budget. (2) When that call still returns no text or ends on `budget`, `renderDiffAnswer` renders the diff in code — every subject, its recorded value, the fresh status, the URL and any notable change — so a re-check always answers. (3) `conclude()` traces the text the user actually saw, with `answerKind: "model" | "fallback"`; the eval runner reads that field and the re-check sources, so the judge grades the real answer with the evidence the agent saw.
+**Status:** fixed
+**Eval:** brief-1 plus unit tests "the answer call never re-searches, however many rows are verified", "an empty answer text falls back to a deterministic re-check answer" and "the deterministic fallback lists every claim and keeps history honest".
+**Evidence:** preserved pre-fix trace, `traces/curated/2026-11-18-161429-brief-1-budget.md`:
+```
+| extract | – | 8645 | ... |
+| answer | 0 | 2881 | ... | 28 |
+| answer | 1 | 3286 | ... | 139 |
+verdict: incomplete
+...
+- claim 1: not_found — $20/seat per month https://fairlycompared.com/crm/hubspot
+- claim 5: changed — $11/month https://saaspricehub.io/questions/how-often-does-freshsales-change-prices
+...
+FINAL (incomplete):
+I stopped while writing the re-check for 2026-11-16 without an answer.
+```
+The same turn's JSONL event was `{"type":"final",...,"content":"","stopReason":"budget"}`, which is why the report showed `(empty)`. After the fix the answer call has no tool to call, and a stub model that returns no text still yields the per-vendor fallback in the unit test above.
 
 ## Live eval evidence for the grounding changes (2026-11-17)
 
@@ -287,4 +315,14 @@ pipeline — `grounding-001`, `citation-001` and `scope-001` passed in the final
 runs, and `recency-001` passed in one of them. `calibration-001` (F-004) also
 varies and remains open. Two robustness fixes came out of these runs: a dated
 source list is now stated on every sourced answer, and a re-check whose answer
-call returns empty text is reported as incomplete rather than saved as a blank.
+call returns empty text is rendered in code rather than saved as a blank (F-013).
+
+## Live eval evidence for the re-check fix (2026-11-18)
+
+`eval/curated/1795005488403.md`: offline 18/18, live 10/12. All three brief
+examples pass, including brief-1, which now returns a model-written answer for
+all five vendors and states that no fresh pricing or release information could
+be verified. The two remaining failures are `grounding-001` and
+`citation-001`, both value-support defects in table cells (F-012), not temporal
+recall or answer-budget failures. `brief-1`'s answer kind was `model`; the
+deterministic path is covered by unit tests rather than this run.

@@ -47,7 +47,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     dbPath: env.DB_PATH ?? "data/agent.db",
     tracesDir: env.TRACES_DIR ?? "traces",
     maxSteps: positiveInt(env, "MAX_STEPS", 5),
-    maxRecheckSearches: positiveInt(env, "MAX_RECHECK_SEARCHES", 8),
+    maxRecheckSearches: positiveInt(env, "MAX_RECHECK_SEARCHES", 12),
     maxPageFetches: positiveInt(env, "MAX_PAGE_FETCHES", 6),
   };
 

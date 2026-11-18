@@ -124,10 +124,19 @@ test("a finished run renders its phases and an ok verdict", () => {
         },
       ],
       errors: {},
+      sources: [
+        {
+          title: "Node downloads",
+          url: "https://nodejs.org",
+          content: "v26 is the latest LTS",
+        },
+      ],
+      answerKind: "fallback",
     });
     tracer.final({
       steps: 2,
       content: "v26 is stable.",
+      answerKind: "model",
       totalMs: 500,
       stopReason: "answered",
     });
@@ -139,11 +148,15 @@ test("a finished run renders its phases and an ok verdict", () => {
     assert.match(markdown, /searching for node/);
     assert.match(markdown, /\| extract \|/);
     assert.match(markdown, /## Re-check/);
+    assert.match(markdown, /### Re-check sources/);
+    assert.match(markdown, /Answer kind: fallback/);
+    assert.match(markdown, /answer_kind: model/);
     assert.match(markdown, /verdict: ok/);
 
     const events = readFileSync(path.replace(/\.md$/, ".jsonl"), "utf8");
     assert.match(events, /"type":"run_start"/);
     assert.match(events, /"type":"recheck"/);
+    assert.match(events, /"sources":\[/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

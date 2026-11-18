@@ -132,6 +132,7 @@ export type LiveResult = {
   name: string;
   source: string;
   answer: string;
+  answerKind: string | null;
   passed: boolean;
   reasons: string[];
   trace: string | null;
@@ -139,7 +140,10 @@ export type LiveResult = {
   sources: string[];
 };
 
-function readFinalFromTrace(traceDir: string, sessionId: string): string {
+function readFinalFromTrace(
+  traceDir: string,
+  sessionId: string
+): { content: string; answerKind: string | null } {
   const files = readdirSync(traceDir).filter((f) => f.endsWith(".jsonl"));
   for (const file of files) {
     const lines = readFileSync(join(traceDir, file), "utf8")
@@ -148,10 +152,14 @@ function readFinalFromTrace(traceDir: string, sessionId: string): string {
       .map((line) => JSON.parse(line) as Record<string, unknown>);
     if (lines.some((line) => line.type === "run_start" && line.sessionId === sessionId)) {
       const final = [...lines].reverse().find((line) => line.type === "final");
-      return typeof final?.content === "string" ? final.content : "";
+      return {
+        content: typeof final?.content === "string" ? final.content : "",
+        answerKind:
+          typeof final?.answerKind === "string" ? final.answerKind : null,
+      };
     }
   }
-  return "";
+  return { content: "", answerKind: null };
 }
 
 /** The retrieved snippets, so the judge can tell a sourced claim from a guess. */
@@ -170,6 +178,16 @@ function readSourcesFromTrace(traceDir: string, sessionId: string): string[] {
       const out: string[] = [];
       for (const line of lines.filter((l) => l.type === "tool_call")) {
         for (const result of (line.results ?? []) as Array<Record<string, unknown>>) {
+          out.push(
+            `${result.url ?? ""} ${String(result.content ?? "").slice(0, 600)}`
+          );
+        }
+      }
+      // A re-check searches in code rather than through the tool, so its
+      // sources are on the recheck event. Without this the judge sees a
+      // temporal answer with no sources and marks every change unsourced.
+      for (const line of lines.filter((l) => l.type === "recheck")) {
+        for (const result of (line.sources ?? []) as Array<Record<string, unknown>>) {
           out.push(
             `${result.url ?? ""} ${String(result.content ?? "").slice(0, 600)}`
           );
@@ -220,6 +238,7 @@ export async function runLive(
     name: testCase.name,
     source: testCase.source,
     answer: "",
+    answerKind: null,
     passed: false,
     reasons: [],
     trace: null,
@@ -246,7 +265,9 @@ export async function runLive(
     base.error = err instanceof Error ? err.message.slice(0, 400) : String(err);
   }
 
-  base.answer = readFinalFromTrace(traceDir, sessionId);
+  const final = readFinalFromTrace(traceDir, sessionId);
+  base.answer = final.content;
+  base.answerKind = final.answerKind;
   const traceFile = readdirSync(traceDir).find((f) => f.endsWith(".md"));
   base.trace = traceFile ? join(traceDir, traceFile) : null;
   base.sources = readSourcesFromTrace(traceDir, sessionId);
@@ -316,10 +337,17 @@ export function renderReport(
     );
   }
   if (live.length) {
-    lines.push("", "## Live (LLM-judged)", "", "| case | result | reasons |", "|------|:------:|---------|");
+    lines.push(
+      "",
+      "## Live (LLM-judged)",
+      "",
+      "| case | result | answer kind | reasons |",
+      "|------|:------:|:-----------:|---------|"
+    );
     for (const r of live) {
       lines.push(
-        `| ${r.id} | ${r.passed ? "pass" : "FAIL"} | ${r.reasons.join("; ").replace(/\|/g, "\\|")} |`
+        `| ${r.id} | ${r.passed ? "pass" : "FAIL"} | ${r.answerKind ?? "unknown"} | ` +
+          `${r.reasons.join("; ").replace(/\|/g, "\\|")} |`
       );
     }
 
@@ -329,7 +357,18 @@ export function renderReport(
     if (failures.length > 0) {
       lines.push("", "## Live failures (full answers)", "");
       for (const r of failures) {
-        lines.push(`### ${r.id}`, "", "ANSWER:", "````", r.answer || "(empty)", "````", "", "SOURCES:");
+        lines.push(
+          `### ${r.id}`,
+          "",
+          `Answer kind: ${r.answerKind ?? "unknown"}`,
+          "",
+          "ANSWER:",
+          "````",
+          r.answer || "(empty)",
+          "````",
+          "",
+          "SOURCES:"
+        );
         lines.push(...(r.sources.length ? r.sources.map((s) => `- ${s}`) : ["(none)"]));
         lines.push("", `trace: ${r.trace ?? "none"}`, "");
       }

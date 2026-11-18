@@ -38,7 +38,7 @@ Optional, with defaults:
 - `DB_PATH` (default `data/agent.db`) — SQLite file.
 - `TRACES_DIR` (default `traces`) — where the per-run `.md`/`.jsonl` evidence goes.
 - `MAX_STEPS` (default `5`) — model turns before the loop gives up and says so.
-- `MAX_RECHECK_SEARCHES` (default `8`) — subjects a single temporal re-check may search.
+- `MAX_RECHECK_SEARCHES` (default `12`) — queries (attribute plus change) a single temporal re-check may run.
 - `MAX_PAGE_FETCHES` (default `6`) — pages fetched to ground one answer.
 
 ## Memory
@@ -82,13 +82,25 @@ answer. Questions that needed no search skip the extra call entirely.
 Questions that name a date and ask whether an earlier answer is still correct
 take a separate path. `detect.ts` decides from the text alone — no classifier
 call. The pipeline pulls that date's claims (or current beliefs if the date is
-empty), searches each subject in parallel, extracts fresh values with one
-structured-output call, and hands a dated diff to the model to write the answer.
+empty), then searches each subject twice in parallel: once for the recorded
+attribute and once for "changelog / release notes / new features since DATE".
+The second query exists because "has anything changed?" is not only a price
+question; brief-1 also asks whether a vendor shipped something big. One
+structured-output call reads fresh values and any sourced notable change from
+the retrieved text, and the model writes the answer from a dated diff.
+
+The answer call is a single call with no tools. The per-subject searches have
+already run, so letting the model search again let it spend its whole step
+budget searching and return nothing (F-013). If that call still returns no text,
+`renderDiffAnswer` renders the same diff in code — every subject, its recorded
+value, the fresh status and the source — so a re-check always answers. The trace
+records `answer_kind: model|fallback`, the re-check sources, and any fallback
+reason; the live judge receives those sources too.
 
 Changed values supersede in the ledger; every check — including "unchanged"
 and "not found" — is written to a `verifications` table, so a fact that was
 re-verified today is not mistaken for one never checked. Set
-`MAX_RECHECK_SEARCHES` (default 8) to bound the fan-out.
+`MAX_RECHECK_SEARCHES` (default 12) to bound the fan-out.
 
 "Not found" never becomes "still correct," and neither does a value whose
 source never stated it: `enforceValueInSources` downgrades an `unchanged` or
@@ -98,10 +110,10 @@ answer call is told explicitly that an unverified row's recorded value is histor
 any sentence that presents it as current into a "could not verify" statement
 that still names the recorded value and its date. Only sentences that assert
 currency ("still", "current", "unchanged") are rewritten; an explicit hedge or
-a sentence that merely mentions the value in the past is left alone. When every
-row is unverified the answer call gets no search tool, so it cannot waste its
-step budget and return an empty answer. Every rewrite is traced as
-`recheck_rewrites`.
+a sentence that merely mentions the value in the past is left alone. The answer
+call never gets a search tool, so it cannot waste its step budget and return an
+empty answer; if it returns nothing anyway, the diff is rendered in code. Every
+rewrite is traced as `recheck_rewrites`.
 
 ## Answer grounding
 
@@ -145,9 +157,20 @@ and search) and a rubric describing a good answer.
 `npm run eval` runs the probes — free and repeatable, and also part of `npm test`.
 `npm run eval:live` runs each case through the real CLI in a throwaway session,
 then asks the model to judge the answer against its rubric; the report is written
-to `eval/results/`. A nonzero exit means at least one case failed. The four
-failures still expected in the live sweep are F-002, F-003, F-005 and F-006 —
-the open grounding, citation, scope and recency failures in `FAILURES.md`.
+to `eval/results/`. A nonzero exit means at least one case failed. The report
+names the answer kind (`model` or `fallback`) next to each result, and failing
+answers are printed with the sources the agent saw. Old reports are kept, not
+overwritten.
+
+**Latest run, 2026-11-18** (`eval/curated/1795005488403.md`): offline **18/18**,
+live **10/12**. `brief-1` now passes with a model answer that covers all five
+vendors and says plainly that no fresh pricing or release information could be
+verified. The two remaining live failures are `grounding-001` and
+`citation-001`, and they are the same defect: a table cell states a number the
+URL beside it does not contain ("500 MB RAM", "1 GB Postgres storage", "20 GB
+across projects"). `support.ts` checks a number plus one unit word, so these
+survive. That is F-012, still open; it is a value-grounding gap, not a memory or
+temporal-recall gap.
 
 ## Traces
 
@@ -155,6 +178,8 @@ Each turn writes `traces/<date>-<time>-<slug>.md` and `.jsonl`: steps, tokens,
 latency, search queries, sources, the notebook that was injected, the claims
 recorded (including extraction errors), the re-check diff, the grounding
 critic and scope phases, and a verdict
-(`ok`, `incomplete`, `error`). Set `TRACES_DIR` to move them. Runtime traces are
+(`ok`, `incomplete`, `error`). Re-check runs also record `answer_kind:
+model|fallback`, the re-check sources, and the reason for any fallback. Set
+`TRACES_DIR` to move them. Runtime traces are
 gitignored; the ones `FAILURES.md` cites are committed under `traces/curated/`
 and `eval/curated/`, so every citation resolves.

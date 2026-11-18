@@ -42,7 +42,16 @@ export type RecheckTrace = {
     mismatch?: boolean;
     matchedAttribute?: string | null;
   }>;
-  errors: { extraction?: string; writeBack?: string };
+  errors: { extraction?: string; writeBack?: string; answer?: string };
+  /** The sources the re-check actually searched, so the trace and the live
+   * judge can see what the re-check saw. */
+  sources?: Array<{
+    title: string;
+    url: string;
+    content: string;
+    publishedAt?: string | null;
+  }>;
+  answerKind?: "model" | "fallback";
   guard?: { rewritten: string[] };
 };
 
@@ -68,6 +77,8 @@ type Recall = {
 type Final = {
   steps: number;
   content: string;
+  /** "model" is a model-written answer; "fallback" is code-rendered text. */
+  answerKind?: "model" | "fallback";
   totalMs: number;
   stopReason: StopReason;
 };
@@ -339,6 +350,8 @@ export class Tracer {
       `claims: ${this.claimInfo?.extracted ?? 0}`,
       `recheck_claims: ${this.recheckInfo?.claimsChecked ?? 0}`,
       `recheck_rewrites: ${this.recheckInfo?.guard?.rewritten.length ?? 0}`,
+      `recheck_answer_kind: ${this.recheckInfo?.answerKind ?? "n/a"}`,
+      `answer_kind: ${this.finalInfo?.answerKind ?? "n/a"}`,
       `critic_statements: ${this.criticInfo?.statements ?? 0}`,
       `critic_dropped: ${this.criticInfo?.dropped ?? 0}`,
       `critic_replaced: ${this.criticInfo?.replaced.length ?? 0}`,
@@ -483,8 +496,13 @@ export class Tracer {
         `| ${r.claimsChecked} | ${r.queries.length} | ${r.failedSearches} | ` +
           `${r.usedSearch} | ${r.writeBack.inserted} | ${r.writeBack.superseded} | ` +
           `${r.writeBack.verifications} |`,
+        "",
+        `Answer kind: ${r.answerKind ?? "model"}`,
         ""
       );
+      if (r.errors.answer) {
+        lines.push(`**Answer fallback:** ${r.errors.answer}`, "");
+      }
       if (r.errors.extraction) {
         lines.push(`**Fresh-value extraction failed:** ${r.errors.extraction}`, "");
       }
@@ -497,6 +515,15 @@ export class Tracer {
         );
       }
       lines.push("");
+
+      if (r.sources && r.sources.length > 0) {
+        lines.push("### Re-check sources", "");
+        lines.push("| title | URL |", "|-------|-----|");
+        for (const source of r.sources) {
+          lines.push(`| ${tableCell(source.title)} | ${tableCell(source.url)} |`);
+        }
+        lines.push("");
+      }
 
       if (r.guard && r.guard.rewritten.length > 0) {
         lines.push("", "### Unverified claims", "");
