@@ -442,6 +442,95 @@ test("extraction downgrades an echoed value that no source states", async () => 
   assert.match(buildDiff([claim], fresh), /does not appear in any fresh source/);
 });
 
+test("an all-unverified re-check disables the answer call's search tool", async () => {
+  const db = freshDb();
+  const claim = recordClaims(
+    db, "s", [extracted("A", "price", "$10")], NOW, IST
+  ).claims[0];
+  let useTools: boolean | undefined;
+
+  const llm: Llm = {
+    structured: async <T>() => ({
+      data: {
+        results: [
+          {
+            claimId: claim.id,
+            value: "",
+            url: null,
+            quote: null,
+            status: "not_found",
+          },
+        ],
+      } as T,
+      usage: NO_USAGE,
+    }),
+    turn: async (request: TurnRequest) => {
+      useTools = request.useTools;
+      return {
+        text: "I could not verify a current price for A.",
+        stopReason: "answered",
+      };
+    },
+  };
+
+  const report = await recheck({
+    ctx: { db, sessionId: "s", timeZone: IST },
+    intent: { date: "2026-11-17", phrase: "still correct" },
+    userText: "Is A still correct?",
+    now: NOW,
+    llm,
+    instructions: "You are a research assistant.",
+    search: async () => [{ title: "A", url: "https://neon.com/pricing", content: "$10" }],
+    maxSearches: 8,
+  });
+
+  assert.equal(useTools, false);
+  assert.equal(report.stopReason, "answered");
+  db.close();
+});
+
+test("a partially verified re-check keeps the search safety valve", async () => {
+  const db = freshDb();
+  const a = recordClaims(db, "s", [extracted("A", "price", "$10")], NOW, IST).claims[0];
+  recordClaims(db, "s", [extracted("B", "price", "$20")], NOW, IST);
+  let useTools: boolean | undefined;
+
+  const llm: Llm = {
+    structured: async <T>() => ({
+      data: {
+        results: [
+          {
+            claimId: a.id,
+            value: "$10",
+            url: "https://neon.com/pricing",
+            quote: "$10",
+            status: "unchanged",
+          },
+        ],
+      } as T,
+      usage: NO_USAGE,
+    }),
+    turn: async (request: TurnRequest) => {
+      useTools = request.useTools;
+      return { text: "A is unchanged; B could not be verified.", stopReason: "answered" };
+    },
+  };
+
+  await recheck({
+    ctx: { db, sessionId: "s", timeZone: IST },
+    intent: { date: "2026-11-17", phrase: "still correct" },
+    userText: "Are A and B still correct?",
+    now: NOW,
+    llm,
+    instructions: "You are a research assistant.",
+    search: async () => [{ title: "A", url: "https://neon.com/pricing", content: "$10" }],
+    maxSearches: 8,
+  });
+
+  assert.equal(useTools, true);
+  db.close();
+});
+
 test("an echoed value leads to an honest re-check answer", async () => {
   const db = freshDb();
   const claim = recordClaims(

@@ -457,6 +457,11 @@ export async function recheck(args: {
     toolDescription:
       "Search the web. Use only if the diff leaves something unverified.",
     maxSteps: ANSWER_STEPS,
+    // When every row is unverified, another search cannot help: the per-subject
+    // searches already ran and found no stated value. Removing the tool stops
+    // the model from spending its step budget and returning an empty answer
+    // (the brief-1 live failure).
+    useTools: fresh.some((value) => value.status !== "not_found"),
     onEvent: (event) => {
       if (event.type === "llm") llmCalls.push(event.call);
       if (event.type === "tool") usedSearch = true;

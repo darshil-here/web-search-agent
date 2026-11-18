@@ -46,6 +46,22 @@ function fakeClient(responses: unknown[]) {
   return { client, requests };
 }
 
+test("useTools false sends no tools to the model", async () => {
+  const { client, requests } = fakeClient([message("a direct answer")]);
+
+  const result = await createLlm(client, "test-model").turn({
+    instructions: "sys",
+    input: [{ role: "user", content: "hello" }],
+    search: async () => [],
+    toolDescription: "search",
+    maxSteps: 1,
+    useTools: false,
+  });
+
+  assert.equal(result.text, "a direct answer");
+  assert.deepEqual(requests[0].tools, []);
+});
+
 test("a reasoning 400 is retried once without the reasoning option", async () => {
   const requests: Array<Record<string, unknown>> = [];
   let next = 0;

@@ -40,17 +40,33 @@ test("rewrites a sentence that mixes a past observation with a current assertion
   assert.doesNotMatch(result.answer, /current price is still/);
 });
 
-test("rewrites even a past-framed value unless the sentence explicitly hedges", () => {
-  // A "recorded"/"last Tuesday" marker in the same sentence is not a promise
-  // that the value is not also being asserted as current. The rewrite keeps
-  // the value and its date, so no information is lost.
+test("keeps a past-framed value when the sentence makes no current claim", () => {
   const answer = "I recorded $19/month last Tuesday, so that is what I wrote then.";
 
-  const result = guardUnverified(answer, HOSTING);
+  assert.deepEqual(guardUnverified(answer, HOSTING), {
+    answer,
+    rewritten: [],
+  });
+});
 
-  assert.equal(result.rewritten.length, 1);
-  assert.match(result.answer, /recorded on 2026-11-10/);
-  assert.match(result.answer, /not confirmed as current/);
+test("keeps a recalled question that merely mentions the unverified value", () => {
+  // The brief-2 regression: the guard rewrote away the sentence that recalled
+  // what the user asked, because the recommendation was an unverified value.
+  const answer =
+    "You asked which Postgres host to use, and I recommended Neon at the time.";
+  const recommendation = [
+    {
+      subject: "Postgres hosting",
+      attribute: "recommended host",
+      value: "Neon",
+      localDate: "2026-11-03",
+    },
+  ];
+
+  assert.deepEqual(guardUnverified(answer, recommendation), {
+    answer,
+    rewritten: [],
+  });
 });
 
 test("keeps a sentence that says the value could not be verified", () => {

@@ -49,6 +49,9 @@ export type TurnRequest = {
   /** What the single web_search tool is for, phrased for this caller's turn. */
   toolDescription: string;
   maxSteps: number;
+  /** False removes the tool entirely. Used when a re-check already found
+   * everything unverified, so there is nothing left for another search. */
+  useTools?: boolean;
   onEvent?: (event: TurnEvent) => void;
 };
 
@@ -149,7 +152,8 @@ class ModelLlm implements Llm {
 
   async turn(request: TurnRequest): Promise<TurnResult> {
     const emit = request.onEvent ?? (() => {});
-    const tools = [searchTool(request.toolDescription)];
+    const tools =
+      request.useTools === false ? [] : [searchTool(request.toolDescription)];
     const input: OpenAI.Responses.ResponseInputItem[] = request.input.map(
       (message) => ({ role: message.role, content: message.content })
     );
