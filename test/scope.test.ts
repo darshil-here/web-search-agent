@@ -11,6 +11,17 @@ test("removes an unprompted adjacent release sentence", () => {
   assert.equal(result.removed.length, 1);
 });
 
+test("removes the adjacent clause, not the sentence that answers the question", () => {
+  const answer =
+    "The releases page lists v26.13.1 as the latest LTS [https://node.test]; it lists v27.0.0-alpha as the latest alpha [https://node.test].";
+  const result = guardScope("What is the latest stable Node.js version?", answer);
+
+  assert.match(result.answer, /v26\.13\.1/);
+  assert.match(result.answer, /latest LTS/);
+  assert.doesNotMatch(result.answer, /alpha/i);
+  assert.equal(result.removed.length, 1);
+});
+
 test("keeps the sibling when the question asked for it", () => {
   const answer = "v26.13.1 is LTS. v27 alpha is experimental.";
   const result = guardScope("Compare stable and alpha Node.js", answer);

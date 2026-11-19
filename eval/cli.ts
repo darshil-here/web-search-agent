@@ -14,10 +14,19 @@ import {
 } from "./runner.js";
 
 const live = process.argv.includes("--live");
+// A targeted sweep costs less when only a few cases changed. `EVAL_ONLY` is an
+// exact list of ids; unset means the full set.
+const only = (process.env.EVAL_ONLY ?? "")
+  .split(",")
+  .map((id) => id.trim())
+  .filter((id) => id !== "");
+const cases = only.length > 0 ? CASES.filter((c) => only.includes(c.id)) : CASES;
 
-console.log(`Running ${CASES.length} eval cases (${live ? "offline + live" : "offline"})...\n`);
+console.log(
+  `Running ${cases.length} eval cases (${live ? "offline + live" : "offline"})...\n`
+);
 
-const offline = await runOfflineAll(CASES);
+const offline = await runOfflineAll(cases);
 for (const result of offline) {
   console.log(
     `${result.passed ? "PASS" : "FAIL"}  ${result.id.padEnd(20)} ${result.name}` +
@@ -30,7 +39,7 @@ if (live) {
   const env = readEnvFile();
   const judge = makeJudge(env);
   console.log("\nLive runs (this calls the model and Tavily)...\n");
-  for (const testCase of CASES) {
+  for (const testCase of cases) {
     if (testCase.live === false) {
       console.log(`SKIP  ${testCase.id.padEnd(20)} pinned clock or offline-only invariant`);
       continue;

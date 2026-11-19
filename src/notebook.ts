@@ -18,7 +18,7 @@ import {
   type Turn,
 } from "./db.js";
 import { describeNow, parseDateRefs, type DateRef } from "./dates.js";
-import { clip, clipWithEllipsis } from "./text.js";
+import { clip, clipWithEllipsis, flatten } from "./text.js";
 
 export type Notebook = {
   text: string;
@@ -142,4 +142,29 @@ export function buildNotebook(
     bytes: Buffer.byteLength(text, "utf8"),
     truncated,
   };
+}
+
+// A question about the conversation's own history, not about the world.
+const ASKS_RECALL =
+  /\b(what did i ask|what was my question|what did we discuss|remind me what i asked)\b/i;
+
+/**
+ * A recall question expects the earlier question itself, not only the fact that
+ * was recorded. The re-check answer is written from the claim diff, which does
+ * not contain the original wording, so put it back in code when the answer
+ * omits it. Only explicit recall questions are touched.
+ */
+export function withRecalledQuestion(
+  ctx: SessionContext,
+  date: string,
+  question: string,
+  answer: string
+): string {
+  if (!ASKS_RECALL.test(question)) return answer;
+  const asked = turnsOnDate(ctx.db, ctx.sessionId, date)
+    .filter((turn) => turn.role === "user")
+    .map((turn) => turn.content.trim())
+    .find((content) => content !== "");
+  if (!asked || answer.includes(asked)) return answer;
+  return `You asked: “${flatten(asked)}”\n\n${answer}`;
 }

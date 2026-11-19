@@ -14,6 +14,18 @@ import type { Llm, LlmCall, PromptMessage, StopReason, Usage } from "./llm.js";
 import type { SearchResult } from "./search.js";
 import { clip } from "./text.js";
 import { guardUnverified } from "./unverified.js";
+import { isVerbatimQuote } from "./support.js";
+import { canonicalUrl } from "./url.js";
+
+// Billing language around a price, not part of what the price is for. Dropped
+// before deciding whether a source's number and the value's feature agree.
+const VALUE_FRAME = new Set([
+  "per", "the", "and", "for", "from", "with", "user", "users", "seat",
+  "seats", "month", "months", "monthly", "year", "years", "annual",
+  "annually", "billing", "billed", "plan", "plans", "tier", "tiers",
+  "price", "pricing", "cost", "costs", "starts", "starting", "about",
+  "around", "over", "under", "more", "less", "than", "plus", "included",
+]);
 
 export type FreshStatus = "changed" | "unchanged" | "not_found";
 
@@ -51,7 +63,9 @@ const UNVERIFIED_CONSTRAINT = `Hard constraint: a row in <recheck-diff> whose st
 not a current observation. Never present its recorded value as the current value.
 You may mention it only as a past observation with its observed date. If every
 row is unverified, say plainly that you could not verify a current value and do
-not claim the earlier answer is still correct.`;
+not claim the earlier answer is still correct. For every row whose status is
+changed or unchanged, put the source URL beside the value you state. A change
+without a URL is not usable evidence.`;
 
 export function buildQueries(claims: Claim[]): string[] {
   const seen = new Set<string>();
@@ -113,24 +127,87 @@ export function enforceAttributeMatch(
  * the model verified the claim against itself. Downgrade any such result to
  * not_found in code, the same discipline `enforceAttributeMatch` applies to a
  * concept mismatch and `critic.ts` applies to an invented URL.
+ *
+ * Comparing the whole descriptive value was too strict: extraction composes
+ * "$25 per user per month for Starter Suite" from a source row that says
+ * "Starter Suite | $25 user/month", and the live brief-1 run downgraded every
+ * correct value to not_found because the words were in a different order. The
+ * check is now about the measure and its identity: the number must appear as a
+ * standalone value, and either the verbatim quote names it or one of the
+ * value's own identity words appears beside it.
  */
 export function enforceValueInSources(
   sources: SearchResult[],
   fresh: FreshValue[]
 ): FreshValue[] {
-  // Whitespace-insensitive comparison so "$19 / month" and "$19/month" agree;
-  // everything else is left literal on purpose. A loosely matching value is
-  // worse than a not_found, which the guard turns into an honest answer.
   const normalise = (text: string): string =>
     text.toLowerCase().replace(/\s+/g, "");
   const corpus = normalise(
     sources.map((source) => `${source.title} ${source.content}`).join("\n")
   );
+  const byUrl = new Map(
+    sources.map((source) => [
+      canonicalUrl(source.url),
+      `${source.title} ${source.content}`,
+    ])
+  );
+
+  /** The words that identify what a value measures, not its billing frame. */
+  const identity = (value: string): string[] =>
+    (value.toLowerCase().match(/[a-z][a-z0-9-]+/g) ?? []).filter(
+      (word) => word.length >= 3 && !VALUE_FRAME.has(word)
+    );
+
+  /** A number must not match inside a larger one: $1 is not $19. */
+  const standalone = (hay: string, number: string): boolean => {
+    let at = hay.indexOf(number);
+    while (at !== -1) {
+      const before = hay[at - 1] ?? "";
+      const after = hay[at + number.length] ?? "";
+      if (!/\d/.test(before) && !/\d/.test(after)) return true;
+      at = hay.indexOf(number, at + 1);
+    }
+    return false;
+  };
 
   return fresh.map((value) => {
     if (value.status === "not_found") return value;
     const stated = normalise(value.value ?? "");
-    if (stated !== "" && corpus.includes(stated)) return value;
+    if (stated === "") return { ...value, status: "not_found" as const, valueNotInSources: true };
+
+    // A named value ("Neon") has no measure to anchor; it must appear whole.
+    const measure = value.value?.match(/\$?\d[\d.,]*/)?.[0] ?? "";
+    if (measure === "" || !standalone(corpus, normalise(measure))) {
+      if (measure !== "") {
+        return { ...value, status: "not_found" as const, valueNotInSources: true };
+      }
+      return corpus.includes(stated)
+        ? value
+        : { ...value, status: "not_found" as const, valueNotInSources: true };
+    }
+
+    // A quote that is verbatim in the cited page and names the measure is the
+    // strongest evidence: it ties the number to a sentence the source states.
+    if (value.quote && value.url) {
+      const cited = byUrl.get(canonicalUrl(value.url));
+      if (
+        cited !== undefined &&
+        isVerbatimQuote(value.quote, cited) &&
+        normalise(value.quote).includes(normalise(measure))
+      ) {
+        return value;
+      }
+    }
+
+    // Otherwise the number needs an identity word near it in the corpus.
+    const words = identity(value.value ?? "");
+    if (words.length === 0) return value;
+    let at = corpus.indexOf(normalise(measure));
+    while (at !== -1) {
+      const window = corpus.slice(Math.max(0, at - 140), at + 160);
+      if (words.some((word) => window.includes(word))) return value;
+      at = corpus.indexOf(normalise(measure), at + 1);
+    }
     return { ...value, status: "not_found" as const, valueNotInSources: true };
   });
 }
@@ -244,7 +321,9 @@ export async function extractFreshValues(
     input: `CLAIMS:\n${claimBlock}\n\nFRESH SOURCES:\n${sourceBlock}`,
   });
 
-  const allowed = new Set(sources.map((source) => source.url));
+  const allowed = new Map(
+    sources.map((source) => [canonicalUrl(source.url), source.url])
+  );
   const recordedIds = new Set(claims.map((claim) => claim.id));
   const byId = new Map<number, FreshValue>();
 
@@ -255,10 +334,9 @@ export async function extractFreshValues(
     const change = result.notableChange
       ? {
           description: clip(result.notableChange.description ?? "", CLAIM_LIMITS.value),
-          url:
-            result.notableChange.url && allowed.has(result.notableChange.url)
-              ? result.notableChange.url
-              : null,
+          url: result.notableChange.url
+            ? allowed.get(canonicalUrl(result.notableChange.url)) ?? null
+            : null,
           quote: result.notableChange.quote
             ? clip(result.notableChange.quote, CLAIM_LIMITS.quote)
             : null,
@@ -272,7 +350,7 @@ export async function extractFreshValues(
       ...result,
       value: clip(result.value ?? "", CLAIM_LIMITS.value),
       quote: result.quote ? clip(result.quote, CLAIM_LIMITS.quote) : null,
-      url: result.url && allowed.has(result.url) ? result.url : null,
+      url: result.url ? allowed.get(canonicalUrl(result.url)) ?? null : null,
       ...(change && change.description ? { notableChange: change } : {}),
     });
   }
@@ -333,15 +411,11 @@ export function buildDiff(claims: Claim[], fresh: FreshValue[]): string {
  * It never presents a not_found value as current, so the F-011 contract holds
  * even when the model is unavailable.
  */
-export function renderDiffAnswer(
-  claims: Claim[],
-  fresh: FreshValue[],
-  date: string
-): string {
+type DiffParts = { lines: string[]; changes: string[] };
+
+function diffParts(claims: Claim[], fresh: FreshValue[]): DiffParts {
   const byId = new Map(fresh.map((value) => [value.claimId, value]));
-  const lines = [
-    `I re-checked the claims recorded for ${date} against fresh sources.`,
-  ];
+  const lines: string[] = [];
   const changes: string[] = [];
   const seenChanges = new Set<string>();
 
@@ -386,11 +460,81 @@ export function renderDiffAnswer(
     }
   }
 
-  if (changes.length > 0) {
-    lines.push("", "Notable changes in fresh sources:", "", ...changes);
-  }
+  return { lines, changes };
+}
 
-  return lines.join("\n");
+export function renderDiffAnswer(
+  claims: Claim[],
+  fresh: FreshValue[],
+  date: string
+): string {
+  const { lines, changes } = diffParts(claims, fresh);
+  const out = [
+    `I re-checked the claims recorded for ${date} against fresh sources.`,
+    ...lines,
+  ];
+  if (changes.length > 0) {
+    out.push("", "Notable changes in fresh sources:", "", ...changes);
+  }
+  return out.join("\n");
+}
+
+/**
+ * Does the answer already give this subject its own verdict? Naming a vendor
+ * in a collective sentence ("none of the five changed") is not a per-vendor
+ * result: the sentence must name the subject *and* carry a status or the value
+ * checked. That distinction is what brief-1 caught.
+ */
+export function coversSubject(
+  answer: string,
+  subject: string,
+  value: FreshValue | undefined,
+  subjects: string[] = [subject]
+): boolean {
+  const name = subject.toLowerCase();
+  const clauses = answer
+    .split(/(?<=[.!?;])\s+|\n+/)
+    .map((clause) => clause.replace(/^\s*[-*]\s*/, ""));
+  return clauses.some((clause) => {
+    const lower = clause.toLowerCase();
+    if (!lower.includes(name)) return false;
+    // A clause that names more than one checked subject carries a joint
+    // verdict, not a result for this one: "Alpha and Beta are both unchanged"
+    // still needs the per-vendor lines.
+    const named = subjects.filter((s) => lower.includes(s.toLowerCase()));
+    if (named.length > 1) return false;
+    if (
+      /\b(?:unchanged|changed|could not verify|couldn't verify|not found|no fresh|still)\b/i.test(
+        clause
+      )
+    ) {
+      // A change is a factual claim about the world, so it needs its source
+      // beside it. If the model says "changed to $9" without a link, the diff
+      // line is appended instead, which carries the URL.
+      if (/\bchanged\b/i.test(clause) && !/https?:\/\//.test(clause)) {
+        return false;
+      }
+      return true;
+    }
+    return value?.value ? clause.includes(value.value) : false;
+  });
+}
+
+/**
+ * Per-subject lines from the same diff, limited to subjects the model answer
+ * did not already report. The rubric asks for a result per vendor; a model that
+ * answers collectively must not hide a vendor the code already checked.
+ */
+export function renderMissingSubjects(
+  claims: Claim[],
+  fresh: FreshValue[],
+  subjects: string[]
+): string[] {
+  const wanted = new Set(subjects.map((subject) => subject.toLowerCase()));
+  return diffParts(claims, fresh).lines.filter((line) => {
+    const match = line.match(/^- (.*?) \/ /);
+    return match ? wanted.has(match[1].toLowerCase()) : false;
+  });
 }
 
 export type WriteBackResult = {
@@ -680,8 +824,42 @@ export async function recheck(args: {
     ? { answer: renderDiffAnswer(claims, fresh, intent.date), rewritten: [] as string[] }
     : guardUnverified(turn.text, unverified);
 
+  // The answer must account for every subject the code checked. A model that
+  // summarises collectively ("none of the five changed") used to hide the
+  // per-vendor results the diff already had; append only the missing ones.
+  // A single-subject re-check ("Still $10.") is already complete, so this
+  // coverage rule only applies when more than one subject was checked.
+  let answer = guarded.answer;
+  if (!failed) {
+    const subjects = [...new Set(claims.map((claim) => claim.subject))];
+    const byId = new Map(fresh.map((value) => [value.claimId, value]));
+    const statusOf = (subject: string) => {
+      const claim = claims.find((item) => item.subject === subject);
+      return claim ? byId.get(claim.id) : undefined;
+    };
+    const uncovered = subjects.filter(
+      (subject) => !coversSubject(answer, subject, statusOf(subject), subjects)
+    );
+    // A single-subject answer is complete once it states the result, so it is
+    // not padded. An asserted change is the exception: it always needs the URL
+    // the diff already has.
+    const missing =
+      subjects.length > 1
+        ? uncovered
+        : uncovered.filter((subject) => statusOf(subject)?.status === "changed");
+    if (missing.length > 0) {
+      const lines = renderMissingSubjects(claims, fresh, missing);
+      if (lines.length > 0) {
+        answer +=
+          subjects.length > 1
+            ? `\n\nPer-vendor results from the diff:\n${lines.join("\n")}`
+            : `\n\n${lines.join("\n")}`;
+      }
+    }
+  }
+
   return newReport(intent, {
-    answer: guarded.answer,
+    answer,
     answerKind: failed ? "fallback" : "model",
     stopReason: "answered",
     queries,

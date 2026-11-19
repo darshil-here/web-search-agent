@@ -8,7 +8,7 @@ import { extractClaims, recordClaims } from "./claims.js";
 import { detectRecheck } from "./detect.js";
 import { recheck, type AnswerKind } from "./recheck.js";
 import { describeNow } from "./dates.js";
-import { buildNotebook } from "./notebook.js";
+import { buildNotebook, withRecalledQuestion } from "./notebook.js";
 import { createLlm, type StopReason, type ToolCall } from "./llm.js";
 import {
   createSearch,
@@ -17,7 +17,7 @@ import {
   type EnrichedSource,
 } from "./search.js";
 import { createFetch, selectUrls } from "./pages.js";
-import { extractSourceDate } from "./source-date.js";
+import { extractSourceDate, relativeDateMention } from "./source-date.js";
 import { ground, needsGrounding } from "./critic.js";
 import { guardScope } from "./scope.js";
 import { guardCalibration } from "./calibration.js";
@@ -224,18 +224,25 @@ async function turn(
         notebookText: notebook.text,
       });
 
+      const answer = withRecalledQuestion(
+        ctx,
+        report.intent.date,
+        userText,
+        report.answer
+      );
+      report.answer = answer;
       for (const call of report.llmCalls) tracer.llmCall(call);
       tracer.recheck(report);
       tracer.log(
         report.answerKind === "fallback"
-          ? `\nRECHECK (${report.intent.date}, code-written answer):\n${report.answer}`
-          : `\nRECHECK (${report.intent.date}):\n${report.answer}`
+          ? `\nRECHECK (${report.intent.date}, code-written answer):\n${answer}`
+          : `\nRECHECK (${report.intent.date}):\n${answer}`
       );
 
       return conclude(
         ctx,
         tracer,
-        report.answer,
+        answer,
         report.stopReason,
         report.llmCalls.length,
         runStart,
@@ -308,13 +315,35 @@ async function turn(
       // The critic is skipped for simple answers, but F-006 still requires a
       // statement about date visibility. Snippets alone are enough to decide
       // this, so no page fetch or model call is needed on the fast path.
-      const hasDate = rankedSources.some(
+      //
+      // Judge freshness against the page the answer actually cites: a dated
+      // page elsewhere in the result set does not date this claim, and a page
+      // showing only "Updated: 18 hours ago" has no visible publication date.
+      const cited = [...answer.matchAll(/https?:\/\/[^\s)\]|,]+/g)].map(
+        (match) => match[0]
+      );
+      const judged = cited.length
+        ? rankedSources.filter((source) => cited.includes(source.url))
+        : rankedSources;
+      const hasDate = judged.some(
         (source) =>
           extractSourceDate(source.content) !== null ||
           (source.publishedAt !== null && source.publishedAt !== undefined)
       );
-      if (!hasDate) {
-        answer += "\n\nNo publication date was visible in the retrieved sources.";
+      // A relative timestamp is visible freshness, not a calendar date. Say so
+      // even when metadata supplied a publishedAt: the reader cannot see it.
+      const visibleDate = judged.some(
+        (source) => extractSourceDate(source.content) !== null
+      );
+      const relative = judged
+        .map((source) => relativeDateMention(source.content))
+        .find((mention) => mention !== null);
+      if (!visibleDate && relative) {
+        answer += `\n\nThe cited page shows a relative update time ("${relative}"), not a calendar date.`;
+      } else if (!hasDate) {
+        answer += cited.length
+          ? "\n\nNo publication date was visible on the cited page; treat the details as current as of this conversation."
+          : "\n\nNo publication date was visible in the retrieved sources.";
       }
     }
 

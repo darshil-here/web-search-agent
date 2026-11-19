@@ -122,16 +122,25 @@ numbers get one extra step: Tavily `/extract` fetches the top pages (two per
 domain, `MAX_PAGE_FETCHES` total), publication dates are read from the text, and
 a critic rewrites the answer so every factual claim carries an inline URL from
 the retrieved set. Unsupported claims are marked "not stated in sources".
-`support.ts` then checks each numeric claim (number plus its unit) against the
-source cited beside it and replaces values that page does not state with
-"not stated in sources";
-the count is traced as `critic_replaced`. Simpler answers skip the fetch and
+`support.ts` then checks every numeric and absence claim against the source
+cited beside it, cell by cell in a table. A value is kept when the cited text
+states the full measure near the feature it belongs to, states the bare number
+near that feature (sources often put the feature first: "Edge function
+invocations | 500,000 per month"), or a verbatim quote from that page states
+both. Anything else is replaced with "not stated in sources"; in a table the
+whole clause is replaced, so a cell never reads "not stated in sources
+snapshot". Citation URLs are matched by host and path and fragments of the same
+page are merged before grading, so a tracked variant keeps its citation and a
+value stated in one excerpt is not graded against only another excerpt of the
+same page. The count is traced as `critic_replaced`. Simpler answers skip the fetch and
 critic, but every sourced answer still gets a statement of whether the sources
 showed a publication date. Tavily's
 publication dates rank search results before the model sees them, so a current
 source appears ahead of a launch-era one. Two deterministic guards finish the
 answer: `calibration.ts` rewrites absolute longevity claims no source states
-into "sources do not state" wording, and `scope.ts` removes sentences
+into "sources do not state" wording, and a universal claim ("both…", "neither…",
+"they don't expire") needs that support for every product the question names,
+and `scope.ts` removes sentences
 volunteering concepts the user did not ask about. All phases appear in the
 trace.
 
@@ -145,6 +154,7 @@ npm run db:check   # exercise the schema against data/db-check.db
 npm run db:reset   # delete data/agent.db
 npm run eval       # 18 offline acceptance cases, no network
 npm run eval:live  # same cases through the real CLI, answers judged by the model
+EVAL_ONLY=grounding-001,calibration-001 npm run eval:live  # only those live cases
 ```
 
 ## Eval set
@@ -162,15 +172,22 @@ names the answer kind (`model` or `fallback`) next to each result, and failing
 answers are printed with the sources the agent saw. Old reports are kept, not
 overwritten.
 
-**Latest run, 2026-11-18** (`eval/curated/1795005488403.md`): offline **18/18**,
-live **10/12**. `brief-1` now passes with a model answer that covers all five
-vendors and says plainly that no fresh pricing or release information could be
-verified. The two remaining live failures are `grounding-001` and
-`citation-001`, and they are the same defect: a table cell states a number the
-URL beside it does not contain ("500 MB RAM", "1 GB Postgres storage", "20 GB
-across projects"). `support.ts` checks a number plus one unit word, so these
-survive. That is F-012, still open; it is a value-grounding gap, not a memory or
-temporal-recall gap.
+**Latest full sweep, 2026-11-19** (`eval/curated/2026-11-19-full.md`): offline
+**18/18**, live **9/12**. `brief-1` and `brief-2` pass (per-vendor coverage and
+the recalled question); the nine passing live cases include every temporal,
+memory, budget, citation and scope case. The three failures were then traced to
+specific code paths and fixed: `support.ts` rejected a value glued to a
+preceding word (`Image 17` + `5 GB`) and could not match a plural feature word;
+`calibration.ts` missed reworded longevity claims; `agent.ts` trusted a
+metadata date when the page showed only "Updated: 18 hours ago".
+
+Re-running those three cases individually (`EVAL_ONLY`) confirms the fixes:
+`grounding-001` and `recency-001` pass in
+`eval/curated/2026-11-19-targeted-grounding-recency.md`, and `calibration-001`
+passes in `eval/curated/2026-11-19-targeted-calibration.md`. A full 12-case
+sweep was not repeated after the last fix because each sweep spends real model
+and search credits; the report above is the measured full run, and the two
+targeted reports are the measured verification of what changed.
 
 ## Traces
 

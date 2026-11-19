@@ -327,6 +327,241 @@ test("an empty answer text falls back to a deterministic re-check answer", async
   db.close();
 });
 
+test("a collective answer still reports every vendor the diff checked", async () => {
+  const db = freshDb();
+  const claims = recordClaims(
+    db,
+    "s",
+    [extracted("Alpha", "price", "$10"), extracted("Beta", "price", "$20")],
+    NOW,
+    IST
+  ).claims;
+
+  const report = await recheck({
+    ctx: { db, sessionId: "s", timeZone: IST },
+    intent: { date: "2026-11-17", phrase: "still correct" },
+    userText: "Have A and B changed?",
+    now: NOW,
+    llm: stubLlm(
+      {
+        results: [
+          {
+            claimId: claims[0].id,
+            value: "$10",
+            url: "https://alpha.test/pricing",
+            quote: "$10",
+            status: "unchanged",
+          },
+          {
+            claimId: claims[1].id,
+            value: "$20",
+            url: "https://beta.test/pricing",
+            quote: "$20",
+            status: "unchanged",
+          },
+        ],
+      },
+      "Nothing changed." // names no vendor
+    ),
+    instructions: "You are a research assistant.",
+    maxSearches: 8,
+    search: async () => [
+      { title: "Alpha", url: "https://alpha.test/pricing", content: "$10" },
+      { title: "Beta", url: "https://beta.test/pricing", content: "$20" },
+    ],
+  });
+
+  assert.equal(report.answerKind, "model");
+  assert.match(report.answer, /Alpha \/ price: unchanged at \$10/);
+  assert.match(report.answer, /Beta \/ price: unchanged at \$20/);
+  db.close();
+});
+
+test("naming every vendor in one collective sentence is not a per-vendor result", async () => {
+  const db = freshDb();
+  const claims = recordClaims(
+    db,
+    "s",
+    [extracted("Alpha", "price", "$10"), extracted("Beta", "price", "$20")],
+    NOW,
+    IST
+  ).claims;
+
+  const report = await recheck({
+    ctx: { db, sessionId: "s", timeZone: IST },
+    intent: { date: "2026-11-17", phrase: "still correct" },
+    userText: "Have Alpha and Beta changed?",
+    now: NOW,
+    llm: stubLlm(
+      {
+        results: [
+          {
+            claimId: claims[0].id,
+            value: "$10",
+            url: "https://alpha.test/pricing",
+            quote: "$10",
+            status: "unchanged",
+          },
+          {
+            claimId: claims[1].id,
+            value: "$20",
+            url: "https://beta.test/pricing",
+            quote: "$20",
+            status: "unchanged",
+          },
+        ],
+      },
+      "Alpha and Beta are both unchanged, but neither can be verified."
+    ),
+    instructions: "You are a research assistant.",
+    maxSearches: 8,
+    search: async () => [
+      { title: "Alpha", url: "https://alpha.test/pricing", content: "$10" },
+      { title: "Beta", url: "https://beta.test/pricing", content: "$20" },
+    ],
+  });
+
+  assert.match(report.answer, /Alpha \/ price: unchanged at \$10/);
+  assert.match(report.answer, /Beta \/ price: unchanged at \$20/);
+  db.close();
+});
+
+test("a changed value without a URL gets the sourced diff line appended", async () => {
+  const db = freshDb();
+  const claim = recordClaims(
+    db,
+    "s",
+    [extracted("Alpha", "price", "$10")],
+    NOW,
+    IST
+  ).claims[0];
+
+  const report = await recheck({
+    ctx: { db, sessionId: "s", timeZone: IST },
+    intent: { date: "2026-11-17", phrase: "still correct" },
+    userText: "Has Alpha changed?",
+    now: NOW,
+    llm: stubLlm(
+      {
+        results: [
+          {
+            claimId: claim.id,
+            value: "$9",
+            url: "https://alpha.test/pricing",
+            quote: "$9",
+            status: "changed",
+          },
+        ],
+      },
+      "Alpha changed to $9."
+    ),
+    instructions: "You are a research assistant.",
+    maxSearches: 8,
+    search: async () => [
+      { title: "Alpha", url: "https://alpha.test/pricing", content: "$9" },
+    ],
+  });
+
+  assert.match(report.answer, /changed to \$9 \(https:\/\/alpha\.test\/pricing\)/);
+  db.close();
+});
+
+test("an answer that already reports each vendor is not duplicated", async () => {
+  const db = freshDb();
+  const claims = recordClaims(
+    db,
+    "s",
+    [extracted("Alpha", "price", "$10"), extracted("Beta", "price", "$20")],
+    NOW,
+    IST
+  ).claims;
+
+  const report = await recheck({
+    ctx: { db, sessionId: "s", timeZone: IST },
+    intent: { date: "2026-11-17", phrase: "still correct" },
+    userText: "Have Alpha and Beta changed?",
+    now: NOW,
+    llm: stubLlm(
+      {
+        results: [
+          {
+            claimId: claims[0].id,
+            value: "$10",
+            url: "https://alpha.test/pricing",
+            quote: "$10",
+            status: "unchanged",
+          },
+          {
+            claimId: claims[1].id,
+            value: "$20",
+            url: "https://beta.test/pricing",
+            quote: "$20",
+            status: "unchanged",
+          },
+        ],
+      },
+      "Alpha is unchanged at $10. Beta is unchanged at $20."
+    ),
+    instructions: "You are a research assistant.",
+    maxSearches: 8,
+    search: async () => [
+      { title: "Alpha", url: "https://alpha.test/pricing", content: "$10" },
+      { title: "Beta", url: "https://beta.test/pricing", content: "$20" },
+    ],
+  });
+
+  assert.doesNotMatch(report.answer, /Per-vendor results/);
+  db.close();
+});
+
+test("markdown bullets count as one clause per vendor", async () => {
+  const db = freshDb();
+  const claims = recordClaims(
+    db,
+    "s",
+    [extracted("Alpha", "price", "$10"), extracted("Beta", "price", "$20")],
+    NOW,
+    IST
+  ).claims;
+
+  const report = await recheck({
+    ctx: { db, sessionId: "s", timeZone: IST },
+    intent: { date: "2026-11-17", phrase: "still correct" },
+    userText: "Have Alpha and Beta changed?",
+    now: NOW,
+    llm: stubLlm(
+      {
+        results: [
+          {
+            claimId: claims[0].id,
+            value: "$10",
+            url: "https://alpha.test/pricing",
+            quote: "$10",
+            status: "unchanged",
+          },
+          {
+            claimId: claims[1].id,
+            value: "$20",
+            url: "https://beta.test/pricing",
+            quote: "$20",
+            status: "unchanged",
+          },
+        ],
+      },
+      "- Alpha is unchanged at $10.\n- Beta is unchanged at $20."
+    ),
+    instructions: "You are a research assistant.",
+    maxSearches: 8,
+    search: async () => [
+      { title: "Alpha", url: "https://alpha.test/pricing", content: "$10" },
+      { title: "Beta", url: "https://beta.test/pricing", content: "$20" },
+    ],
+  });
+
+  assert.doesNotMatch(report.answer, /Per-vendor results/);
+  db.close();
+});
+
 test("recheck falls back to open claims when the named date is empty", async () => {
   const db = freshDb();
   const claim = recordClaims(
@@ -485,6 +720,95 @@ test("a reported value that a source states is left unchanged", () => {
   ];
 
   assert.deepEqual(enforceValueInSources(sources, fresh), fresh);
+});
+
+test("a composed price value is kept when the source states it in a table row", () => {
+  // Extraction writes the fact as a sentence; the source states it as a row.
+  const fresh: FreshValue[] = [
+    {
+      claimId: 1,
+      value: "$25 per user per month for Starter Suite",
+      url: "https://salesforce.test/pricing",
+      quote: "Starter Suite $25 user/month",
+      status: "unchanged",
+    },
+    {
+      claimId: 2,
+      value: "$9 per user per month, billed annually, for Growth",
+      url: "https://freshworks.test/pricing",
+      quote: "Growth | $9/user/month",
+      status: "changed",
+    },
+  ];
+  const sources = [
+    {
+      title: "Salesforce pricing",
+      url: "https://salesforce.test/pricing",
+      content: "Starter Suite $25 user/month. Pro Suite $100 user/month.",
+    },
+    {
+      title: "Freshsales pricing",
+      url: "https://freshworks.test/pricing",
+      content: "Growth | $9/user/month | Small teams\nPro | $29/user/month",
+    },
+  ];
+
+  assert.deepEqual(enforceValueInSources(sources, fresh), fresh);
+});
+
+test("a named fresh value is kept when the source names it", () => {
+  const fresh: FreshValue[] = [
+    {
+      claimId: 1,
+      value: "Neon",
+      url: "https://hosting.test/best",
+      quote: "Neon for serverless Postgres with fast branching.",
+      status: "unchanged",
+    },
+  ];
+  const sources = [
+    {
+      title: "Best Postgres hosting",
+      url: "https://hosting.test/best",
+      content: "Supabase for auth. Neon for serverless Postgres.",
+    },
+  ];
+
+  assert.deepEqual(enforceValueInSources(sources, fresh), fresh);
+});
+
+test("a changed value is kept only when its measure and feature agree", () => {
+  const fresh: FreshValue[] = [
+    {
+      claimId: 1,
+      value: "$9 per user per month for Growth",
+      url: "https://freshworks.test/pricing",
+      quote: null,
+      status: "changed",
+    },
+  ];
+  const sources = [
+    {
+      title: "Freshsales pricing",
+      url: "https://freshworks.test/pricing",
+      content: "Growth | $9/user/month\nPro | $29/user/month",
+    },
+  ];
+
+  // No quote, but "growth" sits beside the number in the corpus.
+  assert.deepEqual(enforceValueInSources(sources, fresh), fresh);
+
+  const wrongFeature = enforceValueInSources(
+    [
+      {
+        title: "Other",
+        url: "https://other.test",
+        content: "Enterprise | $99/user/month",
+      },
+    ],
+    fresh
+  );
+  assert.equal(wrongFeature[0].status, "not_found");
 });
 
 test("a changed value the sources do not state is also downgraded", () => {

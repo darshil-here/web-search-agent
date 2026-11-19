@@ -5,7 +5,7 @@
 // real CLI in a throwaway session/database and judges the answer against the
 // case rubric with the model, then writes a markdown report.
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import OpenAI from "openai";
@@ -115,7 +115,22 @@ Return:
 Be strict about sources. An answer that asserts a change without a source does
 not satisfy "source URL for each change". An honest "I could not verify" is
 acceptable when the rubric allows it. Judge ONLY the listed must and mustNot
-items. Do not penalize the answer for problems that the rubric does not mention.`;
+items. Do not penalize the answer for problems that the rubric does not mention.
+
+The retrieved sources below are evidence. A claim is supported when a retrieved
+source states it, so a mustNot about an unsupported assertion does not apply to
+a claim the sources state explicitly. Only mark a value unsupported when none of
+the retrieved excerpts states it.
+
+Memory context comes from the agent's own store. Zero turns found for the date
+the question asks about is evidence that the conversation has no record on that
+date; stating that absence is grounded, not invented. Judge every claim against
+the evidence provided, including the tool log.
+
+A seeded claim's recorded source is listed in the seeded history and is
+intentionally not in the retrieved set. Citing it beside a historical value is
+correct attribution, not an invented current citation. The source requirement
+applies to a change or a value presented as current.`;
 
 const JUDGE_SCHEMA = {
   type: "object",
@@ -144,6 +159,10 @@ function readFinalFromTrace(
   traceDir: string,
   sessionId: string
 ): { content: string; answerKind: string | null } {
+  // A case can exit before writing a trace (a startup failure, a killed
+  // process). The sweep must report that case as failed, not lose the whole
+  // report to ENOENT.
+  if (!existsSync(traceDir)) return { content: "", answerKind: null };
   const files = readdirSync(traceDir).filter((f) => f.endsWith(".jsonl"));
   for (const file of files) {
     const lines = readFileSync(join(traceDir, file), "utf8")
@@ -162,8 +181,56 @@ function readFinalFromTrace(
   return { content: "", answerKind: null };
 }
 
+/** Read the JSONL trace lines for one run, or [] when it produced no trace. */
+function traceLines(
+  traceDir: string,
+  sessionId: string
+): Array<Record<string, unknown>> {
+  if (!existsSync(traceDir)) return [];
+  for (const file of readdirSync(traceDir).filter((f) => f.endsWith(".jsonl"))) {
+    const lines = readFileSync(join(traceDir, file), "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    if (
+      lines.some(
+        (line) => line.type === "run_start" && line.sessionId === sessionId
+      )
+    ) {
+      return lines;
+    }
+  }
+  return [];
+}
+
+/**
+ * What the agent's own store said, and which searches the tool ran. The judge
+ * needs both: "no turns on 3 November" is grounded in an empty recall, and a
+ * mustNot about searching chat history can only be checked from the tool log.
+ */
+function readMemoryEvidence(
+  traceDir: string,
+  sessionId: string
+): { dates: string[]; rows: number; claims: number; queries: string[] } {
+  const lines = traceLines(traceDir, sessionId);
+  const recall = lines.find((line) => line.type === "recall");
+  const queries = lines
+    .filter((line) => line.type === "tool_call")
+    .map((line) =>
+      String((line.args as Record<string, unknown> | undefined)?.query ?? "")
+    )
+    .filter((query) => query !== "");
+  return {
+    dates: (recall?.dates as string[] | undefined) ?? [],
+    rows: Number(recall?.rows ?? 0),
+    claims: Number(recall?.claims ?? 0),
+    queries,
+  };
+}
+
 /** The retrieved snippets, so the judge can tell a sourced claim from a guess. */
 function readSourcesFromTrace(traceDir: string, sessionId: string): string[] {
+  if (!existsSync(traceDir)) return [];
   const files = readdirSync(traceDir).filter((f) => f.endsWith(".jsonl"));
   for (const file of files) {
     const lines = readFileSync(join(traceDir, file), "utf8")
@@ -175,12 +242,24 @@ function readSourcesFromTrace(traceDir: string, sessionId: string): string[] {
         (line) => line.type === "run_start" && line.sessionId === sessionId
       )
     ) {
-      const out: string[] = [];
+      // The judge must see the same evidence the agent had. A 600-char cap cut
+      // Tavily snippets mid-list, so values like Supabase's "500 MB RAM" were
+      // below the fold and the judge called them unsupported. Keep the whole
+      // snippet and dedupe by URL, because the same page is often returned by
+      // several searches in one turn.
+      const byUrl = new Map<string, string>();
+      const add = (url: unknown, content: unknown) => {
+        const key = String(url ?? "");
+        if (key === "") return;
+        const text = String(content ?? "");
+        const previous = byUrl.get(key);
+        if (previous === undefined || text.length > previous.length) {
+          byUrl.set(key, text);
+        }
+      };
       for (const line of lines.filter((l) => l.type === "tool_call")) {
         for (const result of (line.results ?? []) as Array<Record<string, unknown>>) {
-          out.push(
-            `${result.url ?? ""} ${String(result.content ?? "").slice(0, 600)}`
-          );
+          add(result.url, result.content);
         }
       }
       // A re-check searches in code rather than through the tool, so its
@@ -188,12 +267,10 @@ function readSourcesFromTrace(traceDir: string, sessionId: string): string[] {
       // temporal answer with no sources and marks every change unsourced.
       for (const line of lines.filter((l) => l.type === "recheck")) {
         for (const result of (line.sources ?? []) as Array<Record<string, unknown>>) {
-          out.push(
-            `${result.url ?? ""} ${String(result.content ?? "").slice(0, 600)}`
-          );
+          add(result.url, result.content);
         }
       }
-      return out;
+      return [...byUrl.entries()].map(([url, content]) => `${url} ${content}`);
     }
   }
   return [];
@@ -268,9 +345,15 @@ export async function runLive(
   const final = readFinalFromTrace(traceDir, sessionId);
   base.answer = final.content;
   base.answerKind = final.answerKind;
-  const traceFile = readdirSync(traceDir).find((f) => f.endsWith(".md"));
+  if (!base.error && final.content === "" && !existsSync(traceDir)) {
+    base.error = "the CLI produced no trace; it exited before answering";
+  }
+  const traceFile = existsSync(traceDir)
+    ? readdirSync(traceDir).find((f) => f.endsWith(".md"))
+    : undefined;
   base.trace = traceFile ? join(traceDir, traceFile) : null;
   base.sources = readSourcesFromTrace(traceDir, sessionId);
+  const memory = readMemoryEvidence(traceDir, sessionId);
 
   const rubricText =
     "MUST:\n" +
@@ -287,7 +370,9 @@ export async function runLive(
       (t) => `turn ${t.localDate} ${t.role}: ${t.content}`
     ),
     ...(testCase.seed?.claims ?? []).map(
-      (c) => `claim ${c.localDate}: ${c.subject} / ${c.attribute} = ${c.value}`
+      (c) =>
+        `claim ${c.localDate}: ${c.subject} / ${c.attribute} = ${c.value}` +
+        (c.url ? ` (recorded source: ${c.url})` : "")
     ),
   ].join("\n");
 
@@ -298,7 +383,16 @@ export async function runLive(
     input:
       `RUBRIC:\n${rubricText}\n\n` +
       `SEEDED HISTORY (known to be true):\n${historyText || "(none)"}\n\n` +
-      `RETRIEVED SOURCES (what the agent actually saw):\n${
+      `MEMORY CONTEXT (the agent's own store, before this question):\n` +
+      (memory.dates.length > 0 || memory.rows > 0 || memory.claims > 0
+        ? `dates queried: ${memory.dates.join(", ") || "(none)"}; ` +
+          `turns found: ${memory.rows}; claims found: ${memory.claims}`
+        : "(no memory lookup recorded)") +
+      `\n\nTOOL CALLS (web_search):\n` +
+      (memory.queries.length > 0
+        ? memory.queries.map((query) => `- ${query}`).join("\n")
+        : "none") +
+      `\n\nRETRIEVED SOURCES (what the agent actually saw):\n${
         base.sources.join("\n") || "(none)"
       }\n\n` +
       `ANSWER:\n${base.answer || "(empty answer)"}`,

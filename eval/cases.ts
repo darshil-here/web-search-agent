@@ -383,7 +383,32 @@ export const CASES: EvalCase[] = [
         "| Feature | Neon |\n|---|---|\n| Branching | 10 branches [https://neon.com/pricing] |",
         [{ url: "https://neon.com/pricing", text: "100 projects, 1 GB storage" }]
       );
-      return { claims, guarded };
+      // The live failure is finer than "number absent": the number exists on the
+      // page but belongs to another feature or vendor. A verified quote is the
+      // evidence; a value must appear in it together with its feature.
+      const quoted = guardValueSupport(
+        "| Compute | 500 MB RAM [https://supabase.com/pricing] |",
+        [{ url: "https://supabase.com/pricing", text: "Free: 500 MB database space." }],
+        [
+          {
+            url: "https://supabase.com/pricing",
+            text: "Supabase free includes 500 MB RAM",
+            quote: "Free: 500 MB database space.",
+          },
+        ]
+      );
+      const kept = guardValueSupport(
+        "Supabase includes 2 active projects [https://supabase.com/pricing].",
+        [{ url: "https://supabase.com/pricing", text: "Free: 2 active projects per user." }],
+        [
+          {
+            url: "https://supabase.com/pricing",
+            text: "Supabase includes 2 active projects",
+            quote: "Free: 2 active projects per user.",
+          },
+        ]
+      );
+      return { claims, guarded, quoted, kept };
     },
     check: (o) => {
       const claims = o.claims as Array<{ url: string | null; value: string; quote: string | null }>;
@@ -393,6 +418,10 @@ export const CASES: EvalCase[] = [
       if (guarded.replaced.length !== 1) return "unsupported table value was not marked";
       if (!guarded.answer.includes("not stated in sources")) return "no unknown marker in the cell";
       if (guarded.answer.includes("10 branches")) return "unsupported value still asserted";
+      const quoted = o.quoted as { answer: string; replaced: string[] };
+      if (quoted.replaced.length !== 1) return "a value with a wrong-feature quote was kept";
+      const kept = o.kept as { replaced: string[] };
+      if (kept.replaced.length !== 0) return "a quoted, supported value was marked unknown";
       return null;
     },
     rubric: {
@@ -443,8 +472,10 @@ export const CASES: EvalCase[] = [
     probe: () => ({}),
     check: () => null, // answer-only behaviour, judged live
     rubric: {
-      must: ["sources do not state", "a hedge on longevity"],
-      mustNot: ["genuinely free with no expiration as an assertion"],
+      must: [
+        "attributes any claim about whether a free tier expires to a retrieved source, or hedges when no source states it",
+      ],
+      mustNot: ["asserts a longevity policy that no retrieved source states"],
     },
   },
   {
@@ -477,7 +508,10 @@ export const CASES: EvalCase[] = [
         ? null
         : "abstention not grounded in an empty query";
     },
-    rubric: { must: ["a direct no-history answer"], mustNot: ["a web search for chat history"] },
+    rubric: {
+      must: ["states that this conversation has no record of a question on 3 November"],
+      mustNot: ["a web search for chat history", "invents a past question"],
+    },
   },
   {
     id: "budget-001",

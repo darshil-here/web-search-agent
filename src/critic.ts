@@ -5,7 +5,8 @@
 // URLs and marks unsupported claims; the model never gets a new tool.
 import type { Llm, Usage } from "./llm.js";
 import type { EnrichedSource } from "./search.js";
-import { guardValueSupport } from "./support.js";
+import { guardValueSupport, isVerbatimQuote, type SupportEvidence } from "./support.js";
+import { canonicalUrl } from "./url.js";
 
 export type GroundResult = {
   answer: string;
@@ -34,8 +35,14 @@ You are given the original answer and the sources that were retrieved. Return:
 - revisedAnswer: the same answer with the same markdown structure, but with an
   inline source URL beside every factual claim, written as [URL]. For a table,
   put the URL in the relevant cell. Use ONLY URLs from the source list.
-- statements: one entry per factual claim with its text, the URL used, and
-  supported: true if the source states it, false if it does not.
+- statements: one entry per factual claim with its text, the URL used, a quote,
+  and supported: true if the source states it, false if it does not.
+  The quote must be an exact contiguous excerpt from that URL's text, copied
+  word for word, that states the claim's value together with the feature it
+  belongs to. Do not paraphrase and do not join separate sentences. If no
+  sentence states it, set quote to null and supported to false. For a table
+  cell, quote the source sentence that supports that cell's value for that
+  vendor, not a sentence about a different feature or a different vendor.
   A statement with supported: false must be rendered as "not stated in sources"
   in revisedAnswer instead of being asserted.
 
@@ -53,9 +60,10 @@ const CRITIC_SCHEMA = {
         properties: {
           text: { type: "string" },
           url: { anyOf: [{ type: "string" }, { type: "null" }] },
+          quote: { anyOf: [{ type: "string" }, { type: "null" }] },
           supported: { type: "boolean" },
         },
-        required: ["text", "url", "supported"],
+        required: ["text", "url", "quote", "supported"],
         additionalProperties: false,
       },
     },
@@ -66,8 +74,23 @@ const CRITIC_SCHEMA = {
 
 type CriticData = {
   revisedAnswer: string;
-  statements: Array<{ text: string; url: string | null; supported: boolean }>;
+  statements: Array<{
+    text: string;
+    url: string | null;
+    quote: string | null;
+    supported: boolean;
+  }>;
 };
+
+/** Remove a URL and its markdown wrapper, leaving no empty brackets behind. */
+function stripUrl(text: string, url: string): string {
+  const escaped = url.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return text
+    .replace(new RegExp(`\\[([^\\]]*)\\]\\(\\s*${escaped}\\s*\\)`, "g"), "$1")
+    .replace(new RegExp(`\\[\\s*${escaped}\\s*\\]`, "g"), "")
+    .split(url)
+    .join("");
+}
 
 export async function ground(
   llm: Llm,
@@ -95,16 +118,57 @@ export async function ground(
     });
 
     let revised = data.revisedAnswer || answer;
-    // Strip URLs the critic invented. Literal replacement preserves markdown
-    // structure and surrounding prose unchanged.
+    // A URL the critic wrote that canonicalises to a retrieved page (tracking
+    // query, www, .md) is the same evidence: point the answer at the URL we
+    // actually fetched instead of stripping it. A URL we never retrieved is
+    // removed together with its markdown wrapper so no empty "[]" is left.
+    const retrieved = new Map(sources.map((s) => [canonicalUrl(s.url), s.url]));
     for (const statement of data.statements ?? []) {
-      if (statement.url && !allowed.has(statement.url)) {
-        revised = revised.split(statement.url).join("");
+      if (!statement.url || allowed.has(statement.url)) continue;
+      const match = retrieved.get(canonicalUrl(statement.url));
+      if (match) {
+        revised = revised.split(statement.url).join(match);
+        statement.url = match;
+      } else {
+        revised = stripUrl(revised, statement.url);
       }
     }
     const dropped = (data.statements ?? []).filter((s) => !s.supported).length;
     if (dropped > 0 && !revised.includes("not stated in sources")) {
       revised += "\n\nClaims not stated in sources were marked as such.";
+    }
+
+    // Evidence is the union of the search snippet and the fetched page. A page
+    // fetch can omit a section the snippet contained (or vice versa), and using
+    // `pageText ?? content` let a successful fetch hide the snippet that stated
+    // the value. Keyed by page identity, because the answer cites the clean URL
+    // while search may return a tracked variant.
+    const sourceText = (source: EnrichedSource) =>
+      [source.content, source.pageText ?? ""]
+        .filter((part) => part.trim() !== "")
+        .join("\n");
+    const textByUrl = new Map<string, string>();
+    for (const source of sources) {
+      const key = canonicalUrl(source.url);
+      const previous = textByUrl.get(key);
+      const text = sourceText(source);
+      textByUrl.set(key, previous ? `${previous}\n${text}` : text);
+    }
+    const evidence: SupportEvidence[] = [];
+    for (const statement of data.statements ?? []) {
+      if (!statement.url) continue;
+      const cited = textByUrl.get(canonicalUrl(statement.url));
+      if (cited === undefined) continue;
+      if (!("quote" in statement)) continue; // pre-quote stubs: keep old behaviour
+      const raw = typeof statement.quote === "string" ? statement.quote.trim() : "";
+      evidence.push({
+        url: statement.url,
+        text: statement.text ?? "",
+        quote:
+          raw !== "" && isVerbatimQuote(raw, cited)
+            ? raw
+            : "",
+      });
     }
 
     // The critic's `supported` flags are a hint, not the contract: F-002 showed
@@ -115,10 +179,17 @@ export async function ground(
       revised,
       sources.map((source) => ({
         url: source.url,
-        text: source.pageText ?? source.content,
-      }))
+        text: sourceText(source),
+      })),
+      evidence
     );
-    revised = support.answer;
+    revised = support.answer
+      // The critic can leave a qualifier in front of its own marker ("Up to
+      // not stated in sources"), which reads as if a ceiling survived.
+      .replace(
+        /\b(?:up to|as much as|about|around|nearly)\s+\*{0,2}not stated in sources\*{0,2}/gi,
+        "not stated in sources"
+      );
 
     // Always state date visibility. F-006's rubric asks whether the cited
     // source has a visible date, so silence is never an acceptable answer —

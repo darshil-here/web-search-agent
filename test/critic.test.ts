@@ -65,6 +65,119 @@ test("ground attaches source URLs and marks unsupported statements", async () =>
   assert.equal(result.replaced.length, 1);
 });
 
+test("a tracked variant of a retrieved URL keeps the citation", async () => {
+  const variant: EnrichedSource[] = [
+    {
+      title: "S",
+      url: "https://supabase.test/pricing?ref=scrimba.com",
+      content: "Free: 2 active projects.",
+      pageText: "Free: 2 active projects.",
+      publishedAt: null,
+    },
+  ];
+  const result = await ground(
+    llmReturning({
+      revisedAnswer:
+        "| Projects | up to 2 active projects [https://supabase.test/pricing] |",
+      statements: [
+        {
+          text: "up to 2 active projects",
+          url: "https://supabase.test/pricing",
+          quote: "Free: 2 active projects.",
+          supported: true,
+        },
+      ],
+    }),
+    "| Projects | up to 2 active projects [https://supabase.test/pricing] |",
+    variant,
+    "Compare the tiers"
+  );
+
+  // The critic's URL is the same page as the tracked one search returned, so
+  // the answer points at the URL that was actually fetched.
+  assert.doesNotMatch(result.answer, /\[\]/);
+  assert.match(result.answer, /supabase\.test\/pricing\?ref=scrimba\.com/);
+});
+
+test("an invented URL is removed with its brackets, not left empty", async () => {
+  const result = await ground(
+    llmReturning({
+      revisedAnswer: "Neon has 10 GB [https://invented.test].",
+      statements: [
+        {
+          text: "Neon has 10 GB",
+          url: "https://invented.test",
+          quote: null,
+          supported: false,
+        },
+      ],
+    }),
+    "Neon has 10 GB.",
+    sources,
+    "How much storage?"
+  );
+
+  assert.doesNotMatch(result.answer, /invented\.test/);
+  assert.doesNotMatch(result.answer, /\[\]/);
+});
+
+test("a snippet that states the value survives a fetched page that omits it", async () => {
+  const snippetOnly: EnrichedSource[] = [
+    {
+      title: "N",
+      url: "https://n.test/pricing",
+      content: "Free: up to 6 hours or 1 GB of data changes.",
+      pageText: "Pricing overview. Free plan available.",
+      publishedAt: null,
+    },
+  ];
+  const result = await ground(
+    llmReturning({
+      revisedAnswer:
+        "Neon includes up to 6 hours of recovery [https://n.test/pricing].",
+      statements: [
+        {
+          text: "Neon includes up to 6 hours of recovery",
+          url: "https://n.test/pricing",
+          quote: "Free: up to 6 hours or 1 GB of data changes.",
+          supported: true,
+        },
+      ],
+    }),
+    "Neon includes up to 6 hours of recovery.",
+    snippetOnly,
+    "How much recovery?"
+  );
+
+  // The fetch returned a page without the limit, but the retrieved snippet had
+  // it; one must not hide the other.
+  assert.doesNotMatch(result.answer, /not stated in sources/);
+  assert.match(result.answer, /6 hours/);
+});
+
+test("ground cleans a qualifier left before the critic's marker", async () => {
+  const result = await ground(
+    llmReturning({
+      revisedAnswer:
+        "| Auth | Up to **not stated in sources** [https://n.test] |",
+      statements: [
+        {
+          text: "Auth quota",
+          url: "https://n.test",
+          quote: null,
+          supported: false,
+        },
+      ],
+    }),
+    "| Auth | Up to 60,000 MAUs [https://n.test] |",
+    sources,
+    "Compare auth quotas"
+  );
+
+  assert.doesNotMatch(result.answer, /up to \*{0,2}not stated/i);
+  assert.match(result.answer, /not stated in sources/);
+});
+
 test("ground marks a numeric claim whose value no source states", async () => {
   const result = await ground(
     llmReturning({
@@ -85,6 +198,71 @@ test("ground marks a numeric claim whose value no source states", async () => {
 
   assert.match(result.answer, /not stated in sources/);
   assert.doesNotMatch(result.answer, /10 branches/);
+  assert.equal(result.replaced.length, 1);
+});
+
+test("ground keeps a value supported by a verbatim quote naming its feature", async () => {
+  const quoted: EnrichedSource[] = [
+    {
+      title: "N",
+      url: "https://n.test",
+      content: "Free: 10 GB storage, 2 active projects.",
+      pageText: "Free: 10 GB storage, 2 active projects.",
+      publishedAt: null,
+    },
+  ];
+  const result = await ground(
+    llmReturning({
+      revisedAnswer: "Neon has 10 GB storage [https://n.test].",
+      statements: [
+        {
+          text: "Neon has 10 GB storage",
+          url: "https://n.test",
+          quote: "Free: 10 GB storage",
+          supported: true,
+        },
+      ],
+    }),
+    "Neon has 10 GB storage.",
+    quoted,
+    "How much storage?"
+  );
+
+  assert.doesNotMatch(result.answer, /not stated in sources/);
+  assert.equal(result.replaced.length, 0);
+});
+
+test("ground rejects a quote that is not verbatim in the cited source", async () => {
+  const quoted: EnrichedSource[] = [
+    {
+      title: "N",
+      url: "https://n.test",
+      content: "Free: 10 GB storage, 2 active projects.",
+      pageText: "Free: 10 GB storage, 2 active projects.",
+      publishedAt: null,
+    },
+  ];
+  const result = await ground(
+    llmReturning({
+      revisedAnswer: "Neon has 10 GB RAM [https://n.test].",
+      statements: [
+        {
+          text: "Neon has 10 GB RAM",
+          url: "https://n.test",
+          quote: "Neon has 10 GB RAM",
+          supported: true,
+        },
+      ],
+    }),
+    "Neon has 10 GB RAM.",
+    quoted,
+    "How much RAM?"
+  );
+
+  // The critic invented the quote; an unverified quote is not evidence, so the
+  // value is marked rather than accepted because the number happens to exist.
+  assert.match(result.answer, /not stated in sources/);
+  assert.doesNotMatch(result.answer, /10 GB RAM/);
   assert.equal(result.replaced.length, 1);
 });
 

@@ -16,6 +16,7 @@ import { anchorAttribute, SIBLING_CONCEPTS } from "./concepts.js";
 import type { Llm, Usage } from "./llm.js";
 import type { SearchResult } from "./search.js";
 import { clip } from "./text.js";
+import { canonicalUrl } from "./url.js";
 
 export type ExtractedClaim = {
   subject: string;
@@ -98,7 +99,9 @@ function sanitise(
   sources: SearchResult[],
   question?: string
 ): ExtractedClaim[] {
-  const allowedUrls = new Set(sources.map((source) => source.url));
+  const allowedUrls = new Map(
+    sources.map((source) => [canonicalUrl(source.url), source.url])
+  );
   const seen = new Set<string>();
   const out: ExtractedClaim[] = [];
 
@@ -111,7 +114,9 @@ function sanitise(
     const value = clip(claim.value ?? "", CLAIM_LIMITS.value);
     if (!subject || !attribute || !value) continue;
 
-    const url = claim.url && allowedUrls.has(claim.url) ? claim.url : null;
+    const url = claim.url
+      ? allowedUrls.get(canonicalUrl(claim.url)) ?? null
+      : null;
     const quote = claim.quote ? clip(claim.quote, CLAIM_LIMITS.quote) : null;
     const key = `${subject}|${attribute}|${value}`.toLowerCase();
     if (seen.has(key)) continue;

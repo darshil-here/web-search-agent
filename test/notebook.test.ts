@@ -6,7 +6,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { rmSync } from "node:fs";
 import { openDb, saveClaim, saveTurn } from "../src/db.js";
-import { buildNotebook, NOTEBOOK_MAX_BYTES } from "../src/notebook.js";
+import { buildNotebook, NOTEBOOK_MAX_BYTES, withRecalledQuestion } from "../src/notebook.js";
 
 const PATH = "data/notebook-test.db";
 const IST = "Asia/Kolkata";
@@ -188,5 +188,38 @@ test("a single huge turn is clipped, not allowed to eat the budget", () => {
 
   assert.ok(notebook.bytes <= NOTEBOOK_MAX_BYTES);
   assert.equal(notebook.truncated, false);
+  db.close();
+});
+
+test("a recall answer names the earlier question, quoted from the store", () => {
+  const db = freshDb();
+  seed(db, "2026-11-03", "Which Postgres host should I use?");
+  const ctx = { db, sessionId: "s", timeZone: IST };
+
+  const answer = withRecalledQuestion(
+    ctx,
+    "2026-11-03",
+    "What did I ask you on 3 November? Is your answer still correct today?",
+    "Neon was recorded on 2026-11-03 but is not confirmed as current."
+  );
+
+  assert.match(answer, /You asked: “Which Postgres host should I use\?”/);
+  assert.match(answer, /not confirmed as current/);
+  db.close();
+});
+
+test("a non-recall question is not prefixed", () => {
+  const db = freshDb();
+  seed(db, "2026-11-03", "Which Postgres host should I use?");
+  const ctx = { db, sessionId: "s", timeZone: IST };
+
+  const answer = withRecalledQuestion(
+    ctx,
+    "2026-11-03",
+    "Has Postgres pricing changed since 3 November?",
+    "Neon is unchanged."
+  );
+
+  assert.equal(answer, "Neon is unchanged.");
   db.close();
 });

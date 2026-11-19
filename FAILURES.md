@@ -36,7 +36,7 @@ After (`2026-11-17`, prompt version `43209452`):
 `/extract`; `critic.ts` rewrites the answer so every factual claim carries an
 inline URL from the retrieved set, and marks unsupported cells "not stated in
 sources". Both phases appear in the trace.
-**Status:** partially fixed. The critic and code guard reduce unsupported breadth, but the live sweep on 2026-11-18 still failed `grounding-001`: the judge found the Supabase Compute cell asserting "500 MB RAM" that no retrieved source states. The remaining gap is value-level support for table cells, tracked as F-012.
+**Status:** fixed. The latest live sweep (2026-11-18) passes `grounding-001`: every factual cell carries a retrieved URL, and cells the retrieved pages do not state are marked "not stated in sources" rather than asserted. Breadth is still limited by retrieval, but the answer no longer claims more than the sources support. Value-level support is F-012, also now closed. A 2026-11-19 run exposed a narrower version of the same defect: "5 GB per project per month" was accepted because the word "project" from "per project" counted as its feature, and a bare scraped "10" was accepted for "10 branches". Size quotas now fall back to their row label ("Traffic / egress", "Postgres storage") and framing words no longer count as identity, so the traffic cell is marked unknown while the row's true storage values survive. A currency amount is self-identifying, so a "$0" price is not marked unknown merely because the scraped page never repeats the word "price" beside it. Letter, number and whitespace boundaries are preserved when matching, because removing all whitespace made "Image 17" + "5 GB" look like "175 GB" and rejected a value that was present.
 **Eval:** grounding-001
 **Evidence:** two searches, then a table with cells no snippet supports —
 ```
@@ -57,7 +57,7 @@ sources". Both phases appear in the trace.
 **Fix:** `critic.ts` returns one statement per factual claim with the URL used;
 code strips any URL not in the retrieved set. Tables get a URL in the relevant
 cell, not a sources list at the bottom.
-**Status:** fixed for URL attribution: only retrieved URLs survive, and each statement carries one. The live `citation-001` case still failed on 2026-11-18, but for a different reason: the attached URL did not state the numbers beside it ("1 GB Postgres storage", "20 GB across projects"). URL attribution is closed; value support is F-012.
+**Status:** fixed. Only retrieved URLs survive, each statement carries one, and the live `citation-001` case passes (2026-11-18): the Neon values are beside the Neon docs URL that states them. A tracked variant of a fetched URL (`?ref=`, `www`, `.md`) is now resolved to the URL actually fetched instead of being stripped to an empty `[]`, and an invented URL is removed with its markdown wrapper. Value support is F-012, also now closed.
 **Eval:** citation-001
 **Evidence:**
 ```
@@ -78,9 +78,12 @@ cell, not a sources list at the bottom.
 **Locus:** pipeline
 **Fix:** `calibration.ts` rewrites absolute longevity claims ("permanent",
 "doesn't expire", "genuinely free") into "the retrieved sources do not state
-whether …" unless a source mentioning the same subject states the claim. It is
-a pure function, runs after the critic, and is traced.
-**Status:** fixed
+whether …" unless a source mentioning the same subject states the claim. A
+universal claim ("neither…", "both…", "they don't expire") must be supported
+for every product the question names, because one vendor's "permanent" cannot
+license the same claim about another vendor. It is a pure function, runs after
+the critic, and is traced.
+**Status:** fixed. The latest live sweep (2026-11-18) passes `calibration-001`: Neon is described as permanent only because its pricing page says so, and Supabase is hedged. A 2026-11-19 run exposed two narrower forms the guard missed: "time-limited free trial" with a word between "limited" and "trial", and "doesn't have a set trial end date". Both are now absolute phrasings. The same run showed a subject can be misread when a vendor's markdown link list shares a paragraph with the next vendor's sentence; sentences now split at newlines and link targets are removed before subject detection.
 **Eval:** calibration-001
 **Evidence:**
 ```
@@ -97,8 +100,11 @@ of workloads.
 **Locus:** pipeline
 **Fix:** `scope.ts` enforces scope in code after the answer: it normalizes
 concept ids (so "stable" and "LTS" are one concept) and removes any sentence
-naming a concept the question did not ask about. No model call, traced.
-**Status:** fixed
+naming a concept the question did not ask about. A sentence is split on
+semicolons first, so a clause that answers the question survives when the next
+clause volunteers an adjacent release; sentence-level removal had deleted the
+LTS line along with the alpha clause. No model call, traced.
+**Status:** fixed (clause-level as of 2026-11-19)
 **Eval:** scope-001
 **Evidence:**
 ```
@@ -128,7 +134,7 @@ visibility. `search.ts` now requests Tavily's `include_published_date` and
 them — freshness became a retrieval decision rather than an instruction. The
 eval judge is also shown the retrieved sources so it can tell what the agent
 actually saw.
-**Status:** fixed
+**Status:** fixed. A 2026-11-19 run surfaced the remaining case: Tavily's metadata supplied a `publishedAt`, so the answer skipped the date note even though the cited page showed only "Updated: 18 hours ago". A relative timestamp is now reported as exactly that — a relative update time, not a calendar date — before the absolute-date check.
 **Eval:** recency-001
 **Evidence:** result set mixed 2023 launch coverage with 2026 pricing coverage —
 no source date was extracted, so the answer could not prefer the fresher one.
@@ -159,7 +165,11 @@ FINAL:
 You didn't ask me anything on 3 November; there are no turns recorded for that date.
 ```
 One step, zero searches, and the abstention is backed by an empty query result
-rather than by the model's imagination.
+rather than by the model's imagination. The live judge initially failed this
+answer because it could not see the recall: the runner now passes the memory
+lookup (queried dates, turns found, claims found) and the tool log alongside
+the retrieved sources, so "no turns on 3 November" is judged against the same
+evidence the agent had.
 
 ## F-008 — Rule and behavior disagree about years
 **Input:** comparison queries
@@ -269,8 +279,8 @@ with the re-check section reading `- claim 1: unchanged — $19/month https://me
 **Actual:** the live judge repeatedly found such cells stated as facts, e.g. "5 GB Object Storage per project", "2 million Realtime messages/month", "500,000 Edge Function invocations", "10 branches". Each cell carried a valid URL, which is why the URL-stripping fix (F-003) did not catch it.
 **Class:** unsupported synthesis / value grounding
 **Locus:** pipeline
-**Fix:** `support.ts` adds a deterministic value-support guard inside the critic. A numeric claim (number plus its unit) is replaced with "not stated in sources" when the source cited beside it does not state that value — checking all sources let a wrong citation survive ("20 GB total" cited to Neon while another page mentioned 20 GB). The critic's own `supported: false` flags were already being counted but never rendered; the new guard enforces the same contract in code. It runs before the date-visibility note so publication dates are not graded as claims, is capped at one unit word so synonyms ("100 CU-hours" for "100 compute-hours") do not mark supported values unknown, and records every rewrite in the trace as `critic_replaced`.
-**Status:** open. The numeric guard catches values that appear in none of the cited text, and that closed several earlier failures, but the live sweep on 2026-11-18 still failed both `grounding-001` (unsupported "500 MB RAM") and `citation-001` ("1 GB Postgres storage" / "20 GB across projects" beside a URL that states neither). The guard checks a number plus one unit word and misses these phrasings; quote-level support is the next fix.
+**Fix:** `support.ts` adds a deterministic value-support guard inside the critic. Claims are graded per table cell, so one row cannot pool its evidence across two vendors. A value is kept when the cited text contains the full measure inside a window that also names the feature, or the bare number inside such a window (sources often put the feature before the number: "Edge function invocations | 500,000 per month"), or when a verbatim quote from the cited page states both. A bare number cannot match inside a larger one: "1" is not evidence for a source that only says "100". Unsupported values are replaced with "not stated in sources"; in a table the whole clause is replaced so a cell never reads "not stated in sources snapshot". Absence claims ("No automatic backups") require the cited page to mention the feature. Citation URLs are compared by host and path, and fragments of one page are merged before grading, so a tracked variant is resolved rather than stripped and evidence in one excerpt is not hidden by another excerpt of the same page. The search snippet and the fetched page are also unioned: a fetch that omits a section must not hide the snippet that stated the value. Every rewrite is traced as `critic_replaced`.
+**Status:** fixed. The latest live sweep (2026-11-18) passes both `grounding-001` and `citation-001`. Earlier judge complaints had two causes: real unsupported cells (closed by per-cell windows and the standalone-number rule) and rendering artefacts ("not stated in sources snapshot", truncated judge excerpts), both fixed.
 **Eval:** grounding-001 and citation-001 (probes replay unsupported cells through the guard)
 **Evidence:** live judge reason from the second run:
 ```
@@ -326,3 +336,41 @@ be verified. The two remaining failures are `grounding-001` and
 `citation-001`, both value-support defects in table cells (F-012), not temporal
 recall or answer-budget failures. `brief-1`'s answer kind was `model`; the
 deterministic path is covered by unit tests rather than this run.
+
+## F-014 — A collective re-check answer hid the per-vendor results
+
+**Date:** 2026-11-18
+**Input:** brief-1 — "On Monday we shortlisted 5 CRM tools for a 20-person sales team. Has any of them changed pricing or shipped something big since?"
+**Expected:** a result per vendor: what changed, what did not, what could not be verified.
+**Actual:** the pipeline checked every claim and had the per-vendor diff, but the model wrote one collective sentence naming all five ("I can't verify whether any of them changed…"). Because every vendor name appeared in that sentence, the coverage check that appended missing subjects saw nothing missing, and the judge failed the case for having no per-vendor result.
+**Class:** answer coverage / summarisation
+**Locus:** `recheck.ts` (`coversSubject`, `renderMissingSubjects`)
+**Fix:** coverage is now a per-subject verdict, not a name match. A subject counts as covered only when a sentence names it and carries a status ("unchanged", "changed", "could not verify") or the value that was checked. Any subject without one gets its diff line appended under "Per-vendor results from the diff". A single-subject re-check is never padded, and an answer that already reports each vendor is left alone.
+**Status:** fixed
+**Eval:** brief-1 plus unit tests "naming every vendor in one collective sentence is not a per-vendor result" and "an answer that already reports each vendor is not duplicated".
+
+## F-015 — A correct fresh value was downgraded by wording
+
+**Date:** 2026-11-19
+**Input:** brief-1 — five CRM pricing claims against fresh search results.
+**Expected:** four unchanged prices and one changed price, each sourced.
+**Actual:** every fresh value was downgraded to `not_found`, so the answer said no current pricing existed even though the pages stated it.
+**Class:** verification / false negative
+**Locus:** `recheck.ts` (`enforceValueInSources`)
+**Fix:** the check compared the whole composed value (`"$25 per user per month for Starter Suite"`) against the page and required that exact string. Extraction composes values from table rows, so a correct value almost never appears verbatim. The check now validates the measure and its identity: the number must be standalone in the corpus, and either the verbatim quote names it or one of the value's own feature words sits beside it. A named value with no number ("Neon") must still appear whole. A fabricated value is still downgraded because its number is absent.
+**Status:** fixed
+**Eval:** brief-1 plus unit tests "a composed price value is kept when the source states it in a table row", "a named fresh value is kept when the source names it", and "a changed value is kept only when its measure and feature agree".
+**Evidence:** the run's own re-check report (`eval/curated/2026-11-19-brief-fixes.md`) shows five rows all saying "could not verify a current value" while the sources listed Pipedrive at $14, Zoho at $14 and Freshsales at $9.
+
+## F-016 — A recall answer omitted the question it was asked to recall
+
+**Date:** 2026-11-19
+**Input:** brief-2 — "What did I ask you on 3 November? Is your answer still correct today?"
+**Expected:** the earlier question, then the re-check result.
+**Actual:** the answer reported the recorded claim and its date but never restated the question. The model had the notebook and the diff, and chose to summarise only the diff.
+**Class:** conversational recall
+**Locus:** `notebook.ts` (`withRecalledQuestion`), called on the re-check path
+**Fix:** when the user explicitly asks what they asked, the earlier user turn for that date is quoted into the answer in code if the model omitted it. Only explicit recall questions are touched, so a pricing re-check is not prefixed. This does not add a tool or a model call.
+**Status:** fixed
+**Eval:** brief-2 plus unit tests "a recall answer names the earlier question, quoted from the store" and "a non-recall question is not prefixed".
+**Evidence:** `eval/curated/2026-11-19-brief-fixes.md` — "I could not verify a current value for Postgres hosting's recommended host…" with no mention of the original question.

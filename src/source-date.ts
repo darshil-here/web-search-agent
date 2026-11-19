@@ -50,3 +50,14 @@ export function extractSourceDate(text: string): string | null {
     )
   );
 }
+
+/**
+ * A relative timestamp ("Updated: 18 hours ago") is a freshness signal, not a
+ * calendar date. Tavily's metadata can supply a publishedAt even when the page
+ * shows only a relative string, so the answer should say what is visible.
+ */
+export function relativeDateMention(text: string): string | null {
+  return (
+    text.match(/\b\d+\s+(?:minute|hour|day|week|month)s?\s+ago\b/i)?.[0] ?? null
+  );
+}

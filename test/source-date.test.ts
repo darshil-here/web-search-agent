@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { extractSourceDate } from "../src/source-date.js";
+import { extractSourceDate, relativeDateMention } from "../src/source-date.js";
 
 test("extracts an ISO date after a label", () => {
   assert.equal(extractSourceDate("Updated: 2026-11-14\nPricing..."), "2026-11-14");
@@ -20,4 +20,10 @@ test("returns null when no date is visible", () => {
 
 test("does not invent a date from a bare year", () => {
   assert.equal(extractSourceDate("Pricing updated for 2026"), null);
+});
+
+test("finds a relative update time without treating it as a calendar date", () => {
+  assert.equal(relativeDateMention("Updated: 18 hours ago"), "18 hours ago");
+  assert.equal(extractSourceDate("Updated: 18 hours ago"), null);
+  assert.equal(relativeDateMention("Free plan includes 10 GB storage."), null);
 });
