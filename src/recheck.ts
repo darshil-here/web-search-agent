@@ -668,6 +668,8 @@ export async function recheck(args: {
   /** Turn recall from the ordinary path, for compound questions that also ask
    * what was said on the named date. */
   notebookText?: string;
+  /** Called once with what is about to be searched. Progress reporting only. */
+  onPlan?: (plan: { subjects: string[]; queries: string[] }) => void;
 }): Promise<RecheckReport> {
   const { ctx, intent, now, llm, instructions, search, maxSearches } = args;
 
@@ -685,6 +687,10 @@ export async function recheck(args: {
   // Bound the fan-out: a 20-subject question must not fire 40 searches. Price
   // queries come first so freshness is never starved of the recorded attribute.
   const queries = [...attributeQueries, ...changeQueries].slice(0, maxSearches);
+  args.onPlan?.({
+    subjects: [...new Set(claims.map((claim) => claim.subject))],
+    queries,
+  });
 
   const settled = await Promise.all(
     queries.map(async (query, index) => {

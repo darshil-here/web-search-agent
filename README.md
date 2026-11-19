@@ -16,6 +16,42 @@ npm run dev
 `npm run dev` opens a chat session on stdin. `exit` or Ctrl-D ends it. A single
 question can also be passed as an argument: `npm start -- "what is 17 times 23"`.
 
+## Web chat
+
+```sh
+npm run web   # then open http://localhost:3000
+```
+
+A local, iMessage-style chat for the same agent: live progress while it works,
+clickable citations, and one persistent conversation. It reuses `.env` and the
+same SQLite database as the CLI, and opens the `SESSION_ID` conversation
+(default `local`), so CLI history shows up and the two stay in sync. The
+browser keeps the session id in `localStorage`. `PORT` (optional, default 3000)
+sets the port. The server binds to `127.0.0.1` only and rejects other `Host`
+headers, because it is unauthenticated and spends your API keys.
+
+Enter sends, Shift+Enter adds a newline, and Stop cancels at the next pipeline
+step (a model call already in flight finishes first). On a phone-sized window
+the UI fills the screen; on desktop it sits in an iPhone frame. The frontend is
+plain HTML/CSS/JS in `web/`, with no build step.
+
+Endpoints:
+
+- `POST /api/chat` with `{ sessionId, message }` streams server-sent events:
+  `status` (`{ stage, text, level }`: recall, step budget, search queries and
+  failures, re-check subjects, grounding, claims), `delta` (`{ text }`),
+  `done` (`{ answerKind, stopReason, ms }`) or `error` (`{ message }`).
+- `GET /api/sessions` lists sessions (`id`, `title`, `preview`, `updatedAt`,
+  `turns`) and reports `defaultSessionId` and `timeZone`.
+- `GET /api/sessions/:id/messages` returns that session's turns, oldest first.
+
+The answer arrives as a single `delta`: the model call is not streamed, and the
+grounding, calibration and scope guards rewrite the answer afterwards, so only
+the finished text is safe to show. Search failures, a re-check where some
+searches failed, and an exhausted step budget appear in the chat as warnings.
+Messages for one session run one at a time. `npm run dev` and
+`npm start -- "..."` work exactly as before.
+
 ## Layout
 
 - `src/` — the agent, split by responsibility (see `DESIGN.md`).
@@ -147,7 +183,8 @@ trace.
 ## Commands
 
 ```sh
-npm run dev        # chat
+npm run dev        # chat in the terminal
+npm run web        # chat in the browser at http://localhost:3000
 npm test           # date, model, ledger, re-check and trace tests, no network
 npm run typecheck  # tsc --noEmit
 npm run db:check   # exercise the schema against data/db-check.db

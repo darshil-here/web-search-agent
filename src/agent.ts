@@ -1,6 +1,9 @@
 // The CLI and the per-turn control flow: recall, choose a path, answer, finish.
 // Everything with a second caller lives in the modules below this one.
+import { realpathSync } from "node:fs";
 import { createInterface } from "node:readline";
+import { pathToFileURL } from "node:url";
+import type Database from "better-sqlite3";
 import OpenAI from "openai";
 import { loadConfig } from "./config.js";
 import { appendTurn, openDb, type SessionContext } from "./db.js";
@@ -23,11 +26,13 @@ import { guardScope } from "./scope.js";
 import { guardCalibration } from "./calibration.js";
 import { promptVersion, Tracer } from "./trace.js";
 
-const config = loadConfig();
+export const config = loadConfig();
 const search = createSearch(config.tavilyApiKey);
 const fetchPages = createFetch(config.tavilyApiKey);
 const llm = createLlm(new OpenAI({ apiKey: config.openaiApiKey }), config.model);
 
+// Only meaningful when this file is the CLI entry point; the web server imports
+// this module too and passes its own trace label to runTurn.
 const SINGLE_QUESTION = process.argv[2];
 const INVOCATION =
   SINGLE_QUESTION === undefined
@@ -72,6 +77,50 @@ function message(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+/** What a caller (the web server) can watch while a turn runs. */
+export type RunEvent =
+  | {
+      type: "status";
+      stage:
+        | "recall"
+        | "model"
+        | "search"
+        | "recheck"
+        | "grounding"
+        | "claims"
+        | "budget";
+      text: string;
+      level: "info" | "warn";
+    }
+  | { type: "delta"; text: string }
+  | {
+      type: "done";
+      answerKind: AnswerKind;
+      stopReason: StopReason;
+      ms: number;
+    };
+
+type StatusEvent = Extract<RunEvent, { type: "status" }>;
+
+type TurnHooks = {
+  emit?: (event: RunEvent) => void;
+  signal?: AbortSignal;
+  command?: string;
+};
+
+type ClaimsSummary = Parameters<Tracer["claims"]>[0];
+
+const plural = (n: number, word: string): string =>
+  `${n} ${word}${n === 1 ? "" : "s"}`;
+
+let sharedDb: Database.Database | undefined;
+
+/** One connection per process, opened on first use. */
+export function getDb(): Database.Database {
+  sharedDb ??= openDb(config.dbPath);
+  return sharedDb;
+}
+
 /**
  * Post-answer claim recording. This is pipeline code, not a second tool: the
  * model still exposes exactly one tool (web_search). It is deliberately
@@ -85,10 +134,10 @@ async function ledger(
   sources: SearchResult[],
   now: Date,
   question: string
-): Promise<void> {
+): Promise<ClaimsSummary | null> {
   // No search means no external facts were introduced, so there is nothing to
   // put in the ledger. Skipping saves a model call on arithmetic/memory turns.
-  if (sources.length === 0) return;
+  if (sources.length === 0) return null;
 
   const started = performance.now();
   try {
@@ -112,7 +161,7 @@ async function ledger(
       now,
       ctx.timeZone
     );
-    tracer.claims({
+    const summary: ClaimsSummary = {
       extracted: extracted.length,
       inserted: result.inserted,
       superseded: result.superseded,
@@ -123,16 +172,20 @@ async function ledger(
         value: claim.value,
         url: claim.url,
       })),
-    });
+    };
+    tracer.claims(summary);
+    return summary;
   } catch (err) {
-    tracer.claims({
+    const summary: ClaimsSummary = {
       extracted: 0,
       inserted: 0,
       superseded: 0,
       unchanged: 0,
       claims: [],
       error: message(err),
-    });
+    };
+    tracer.claims(summary);
+    return summary;
   }
 }
 
@@ -146,7 +199,7 @@ function conclude(
   runStart: number,
   now: Date,
   answerKind: AnswerKind
-): { answer: string; stopReason: StopReason } {
+): { answer: string; stopReason: StopReason; answerKind: AnswerKind } {
   // Trace what the user actually saw, not an empty string. A fallback or a
   // budget message is evidence; the verdict and stopReason still say it failed.
   tracer.final({
@@ -161,7 +214,7 @@ function conclude(
     appendTurn(ctx, "assistant", answer, now);
   }
 
-  return { answer, stopReason };
+  return { answer, stopReason, answerKind };
 }
 
 function budgetAnswer(searches: string[], maxSteps: number): string {
@@ -174,8 +227,36 @@ function budgetAnswer(searches: string[], maxSteps: number): string {
 
 async function turn(
   userText: string,
-  ctx: SessionContext
-): Promise<{ answer: string; stopReason: StopReason }> {
+  ctx: SessionContext,
+  hooks: TurnHooks = {}
+): Promise<{ answer: string; stopReason: StopReason; answerKind: AnswerKind }> {
+  const status = (
+    stage: StatusEvent["stage"],
+    text: string,
+    level: StatusEvent["level"] = "info"
+  ): void => hooks.emit?.({ type: "status", stage, text, level });
+  // A no-op without a signal, so the CLI path is unchanged.
+  const checkpoint = (): void => hooks.signal?.throwIfAborted();
+
+  // The same search function for the model's tool and the re-check fan-out,
+  // with progress reported around it. Errors pass through untouched.
+  const trackedSearch = async (query: string): Promise<SearchResult[]> => {
+    checkpoint();
+    status("search", `Searching the web: ${query}`);
+    try {
+      const found = await search(query);
+      status("search", `Found ${plural(found.length, "result")}`);
+      return found;
+    } catch (err) {
+      status(
+        "search",
+        `Search failed for "${query}": ${message(err)}`,
+        "warn"
+      );
+      throw err;
+    }
+  };
+
   // One instant per turn, so the prompt, the notebook, both turns and the
   // ledger all agree on what day it is.
   const now = new Date();
@@ -184,7 +265,7 @@ async function turn(
 
   tracer.runStart({
     model: config.model,
-    command: INVOCATION,
+    command: hooks.command ?? INVOCATION,
     promptVersion: promptVersion(SYSTEM_TEMPLATE),
     systemPrompt: instructions,
     sessionId: ctx.sessionId,
@@ -203,6 +284,15 @@ async function turn(
     bytes: notebook.bytes,
     truncated: notebook.truncated,
   });
+  if (notebook.rows > 0 || notebook.claims > 0) {
+    status(
+      "recall",
+      `Recalling ${plural(notebook.rows, "earlier turn")} and ${plural(
+        notebook.claims,
+        "known fact"
+      )}`
+    );
+  }
 
   appendTurn(ctx, "user", userText, now);
 
@@ -212,6 +302,10 @@ async function turn(
     // the try so the finally below always flushes the trace.
     const intent = detectRecheck(userText, now, ctx.timeZone);
     if (intent) {
+      status(
+        "recheck",
+        `Re-check: comparing earlier answers for ${intent.date}`
+      );
       const report = await recheck({
         ctx,
         intent,
@@ -219,10 +313,27 @@ async function turn(
         now,
         llm,
         instructions,
-        search,
+        search: trackedSearch,
         maxSearches: config.maxRecheckSearches,
         notebookText: notebook.text,
+        onPlan: ({ subjects }) => {
+          const list = subjects.join(", ");
+          status(
+            "recheck",
+            `Re-checking ${plural(subjects.length, "subject")}: ${
+              list.length > 120 ? `${list.slice(0, 117)}...` : list
+            }`
+          );
+        },
       });
+      checkpoint();
+      if (report.failedSearches > 0) {
+        status(
+          "recheck",
+          `${report.failedSearches} of ${report.queries.length} searches failed`,
+          "warn"
+        );
+      }
 
       const answer = withRecalledQuestion(
         ctx,
@@ -262,12 +373,16 @@ async function turn(
         { role: "developer", content: notebook.text },
         { role: "user", content: userText },
       ],
-      search,
+      search: trackedSearch,
       toolDescription: "Search the web. Use for anything current or factual.",
       maxSteps: config.maxSteps,
       onEvent: (event) => {
         if (event.type === "step") {
           tracer.log(`\n--- step ${event.step}, ${event.items} items ---`);
+          status(
+            "model",
+            `Thinking (step ${event.step + 1} of ${config.maxSteps})`
+          );
           return;
         }
         if (event.type === "llm") {
@@ -291,7 +406,14 @@ async function turn(
       },
     });
 
+    checkpoint();
+
     if (result.stopReason === "budget") {
+      status(
+        "budget",
+        `Step budget exhausted (${config.maxSteps} of ${config.maxSteps}); stopped without an answer`,
+        "warn"
+      );
       const answer = budgetAnswer(searches, config.maxSteps);
       tracer.log("\nFINAL (incomplete):\n" + answer);
       return conclude(
@@ -352,9 +474,13 @@ async function turn(
       rankedSources.length > 0 &&
       needsGrounding(answer)
     ) {
-      const pages = await fetchPages(
-        selectUrls(rankedSources, 2, config.maxPageFetches)
+      checkpoint();
+      const urls = selectUrls(rankedSources, 2, config.maxPageFetches);
+      status(
+        "grounding",
+        `Grounding: fetching ${plural(urls.length, "source page")} to check the numbers`
       );
+      const pages = await fetchPages(urls);
       const enriched: EnrichedSource[] = rankedSources.map((source) => {
         const pageText = pages.find((p) => p.url === source.url)?.text ?? null;
         const text = `${source.content}\n${pageText ?? ""}`;
@@ -378,6 +504,21 @@ async function turn(
         tracer.log(
           `(grounding critic failed: ${grounded.error}; using original answer)`
         );
+        status(
+          "grounding",
+          `Grounding check failed: ${grounded.error}; using the original answer`,
+          "warn"
+        );
+      } else if (grounded.replaced.length > 0) {
+        status(
+          "grounding",
+          `Grounding: replaced ${plural(
+            grounded.replaced.length,
+            "unsupported value"
+          )} with "not stated in sources"`
+        );
+      } else {
+        status("grounding", "Grounding: every value is supported by a source");
       }
       answer = grounded.answer;
     }
@@ -391,7 +532,33 @@ async function turn(
 
     tracer.log("\nFINAL:\n" + scoped.answer);
     if (scoped.answer.trim() !== "") {
-      await ledger(ctx, tracer, scoped.answer, sources, now, userText);
+      checkpoint();
+      if (sources.length > 0) status("claims", "Extracting claims to remember");
+      const recorded = await ledger(
+        ctx,
+        tracer,
+        scoped.answer,
+        sources,
+        now,
+        userText
+      );
+      if (recorded?.error) {
+        status(
+          "claims",
+          `Claim extraction failed (answer unaffected): ${recorded.error}`,
+          "warn"
+        );
+      } else if (recorded) {
+        status(
+          "claims",
+          `Claims extracted: ${recorded.extracted}; recorded ${plural(
+            recorded.inserted,
+            "new fact"
+          )}${
+            recorded.superseded > 0 ? `, ${recorded.superseded} superseded` : ""
+          }`
+        );
+      }
     }
 
     return conclude(
@@ -450,20 +617,75 @@ async function chat(ctx: SessionContext): Promise<void> {
   }
 }
 
-const db = openDb(config.dbPath);
-const ctx: SessionContext = {
-  db,
-  sessionId: config.sessionId,
-  timeZone: config.timeZone,
-};
+/**
+ * The per-turn pipeline as a library call. Emits `status` while it works, then
+ * one `delta` with the final text (the model call is not streamed and the
+ * answer is rewritten by the grounding guards, so the finished text is the only
+ * honest thing to show) and `done`. Throws on failure; no `done` is emitted.
+ */
+export async function runTurn(args: {
+  sessionId: string;
+  message: string;
+  onEvent?: (event: RunEvent) => void;
+  signal?: AbortSignal;
+  command?: string;
+}): Promise<{
+  answer: string;
+  stopReason: StopReason;
+  answerKind: AnswerKind;
+  ms: number;
+}> {
+  const started = performance.now();
+  const ctx: SessionContext = {
+    db: getDb(),
+    sessionId: args.sessionId,
+    timeZone: config.timeZone,
+  };
+  const result = await turn(args.message, ctx, {
+    emit: args.onEvent,
+    signal: args.signal,
+    command: args.command,
+  });
+  const ms = Math.round(performance.now() - started);
 
-try {
-  if (SINGLE_QUESTION !== undefined) {
-    const result = await turn(SINGLE_QUESTION, ctx);
-    if (result.stopReason !== "answered") process.exitCode = 1;
-  } else {
-    await chat(ctx);
+  if (result.answer.trim() !== "") {
+    args.onEvent?.({ type: "delta", text: result.answer });
   }
-} finally {
-  db.close();
+  args.onEvent?.({
+    type: "done",
+    answerKind: result.answerKind,
+    stopReason: result.stopReason,
+    ms,
+  });
+  return { ...result, ms };
+}
+
+function isEntryPoint(): boolean {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  try {
+    return import.meta.url === pathToFileURL(realpathSync(entry)).href;
+  } catch {
+    return false;
+  }
+}
+
+if (isEntryPoint()) {
+  const db = getDb();
+  const ctx: SessionContext = {
+    db,
+    sessionId: config.sessionId,
+    timeZone: config.timeZone,
+  };
+
+  try {
+    if (SINGLE_QUESTION !== undefined) {
+      const result = await turn(SINGLE_QUESTION, ctx);
+      if (result.stopReason !== "answered") process.exitCode = 1;
+    } else {
+      await chat(ctx);
+    }
+  } finally {
+    db.close();
+  }
 }

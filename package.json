@@ -5,6 +5,7 @@
   "scripts": {
     "start": "tsx --env-file=.env src/agent.ts",
     "dev": "tsx --env-file=.env src/agent.ts",
+    "web": "tsx --env-file=.env src/server.ts",
     "trace": "npm start --",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test",
