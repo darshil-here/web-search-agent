@@ -88,6 +88,8 @@ export type CriticTrace = {
   dropped: number;
   replaced: string[];
   note: string | null;
+  /** Snippet + fetched page for each source the guard graded against. */
+  sources?: Array<{ url: string; text: string }>;
   error?: string;
 };
 

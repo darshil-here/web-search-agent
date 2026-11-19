@@ -5,6 +5,7 @@
 // URLs and marks unsupported claims; the model never gets a new tool.
 import type { Llm, Usage } from "./llm.js";
 import type { EnrichedSource } from "./search.js";
+import { extractSourceDate, relativeDateMention } from "./source-date.js";
 import { guardValueSupport, isVerbatimQuote, type SupportEvidence } from "./support.js";
 import { canonicalUrl } from "./url.js";
 
@@ -15,6 +16,8 @@ export type GroundResult = {
   /** Values the critic asserted but no retrieved source stated, rewritten in code. */
   replaced: string[];
   note: string | null;
+  /** The evidence the guard graded against, traced for the eval judge. */
+  sources?: Array<{ url: string; text: string }>;
   error?: string;
   usage: Usage;
 };
@@ -92,6 +95,14 @@ function stripUrl(text: string, url: string): string {
     .join("");
 }
 
+/** Point an already-correct citation at the fetched URL without appending a
+ * second fragment to it. A clean URL is a prefix of its tracked form. */
+function replaceUrl(text: string, from: string, to: string): string {
+  if (from === to) return text;
+  const escaped = from.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return text.replace(new RegExp(`${escaped}(?![\\w#?/.-])`, "g"), to);
+}
+
 export async function ground(
   llm: Llm,
   answer: string,
@@ -123,11 +134,14 @@ export async function ground(
     // actually fetched instead of stripping it. A URL we never retrieved is
     // removed together with its markdown wrapper so no empty "[]" is left.
     const retrieved = new Map(sources.map((s) => [canonicalUrl(s.url), s.url]));
+    const rewritten = new Set<string>();
     for (const statement of data.statements ?? []) {
       if (!statement.url || allowed.has(statement.url)) continue;
+      if (rewritten.has(statement.url)) continue;
+      rewritten.add(statement.url);
       const match = retrieved.get(canonicalUrl(statement.url));
       if (match) {
-        revised = revised.split(statement.url).join(match);
+        revised = replaceUrl(revised, statement.url, match);
         statement.url = match;
       } else {
         revised = stripUrl(revised, statement.url);
@@ -193,13 +207,29 @@ export async function ground(
 
     // Always state date visibility. F-006's rubric asks whether the cited
     // source has a visible date, so silence is never an acceptable answer —
-    // even when some other source in the set did have one.
-    const dated = sources
-      .filter((s) => s.publishedAt !== null)
-      .map((s) => `${s.url} (${s.publishedAt})`);
-    const note = dated.length
-      ? `Publication dates visible in sources: ${dated.join(", ")}.`
-      : "No publication date was visible in the retrieved sources.";
+    // even when some other source in the set did have one. Only dates present
+    // in the page text count as visible: Tavily's publishedAt is metadata, and
+    // listing it made the answer claim dates a reader could not see.
+    const dated: string[] = [];
+    const relative: string[] = [];
+    for (const source of sources) {
+      const text = sourceText(source);
+      const absolute = extractSourceDate(text);
+      if (absolute !== null) dated.push(`${source.url} (${absolute})`);
+      const ago = relativeDateMention(text);
+      if (ago !== null) relative.push(`${source.url} ("${ago}")`);
+    }
+    const dateParts: string[] = [];
+    if (dated.length > 0) {
+      dateParts.push(`Publication dates visible in sources: ${dated.join(", ")}.`);
+    }
+    if (relative.length > 0) {
+      dateParts.push(`Relative update times visible in sources: ${relative.join(", ")}.`);
+    }
+    const note =
+      dateParts.length > 0
+        ? dateParts.join(" ")
+        : "No publication date was visible in the retrieved sources.";
     revised += `\n\n${note}`;
 
     return {
@@ -208,6 +238,10 @@ export async function ground(
       dropped,
       replaced: support.replaced,
       note,
+      sources: sources.map((source) => ({
+        url: source.url,
+        text: sourceText(source).slice(0, 4000),
+      })),
       usage,
     };
   } catch (err) {

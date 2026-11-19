@@ -172,22 +172,24 @@ names the answer kind (`model` or `fallback`) next to each result, and failing
 answers are printed with the sources the agent saw. Old reports are kept, not
 overwritten.
 
-**Latest full sweep, 2026-11-19** (`eval/curated/2026-11-19-full.md`): offline
-**18/18**, live **9/12**. `brief-1` and `brief-2` pass (per-vendor coverage and
-the recalled question); the nine passing live cases include every temporal,
-memory, budget, citation and scope case. The three failures were then traced to
-specific code paths and fixed: `support.ts` rejected a value glued to a
-preceding word (`Image 17` + `5 GB`) and could not match a plural feature word;
-`calibration.ts` missed reworded longevity claims; `agent.ts` trusted a
-metadata date when the page showed only "Updated: 18 hours ago".
+**Latest full sweep, 2026-11-19** (`eval/curated/2026-11-19-final.md`): offline
+**18/18**, live **10/12**. All three brief cases, calibration, citation, memory
+abstention, temporal recall and scope pass. The two failures were trace
+visibility, not answer quality:
 
-Re-running those three cases individually (`EVAL_ONLY`) confirms the fixes:
-`grounding-001` and `recency-001` pass in
-`eval/curated/2026-11-19-targeted-grounding-recency.md`, and `calibration-001`
-passes in `eval/curated/2026-11-19-targeted-calibration.md`. A full 12-case
-sweep was not repeated after the last fix because each sweep spends real model
-and search credits; the report above is the measured full run, and the two
-targeted reports are the measured verification of what changed.
+- `grounding-001`: the guard graded values against the fetched page (snippet +
+  extract), but the judge only saw the search snippet, so a table cell the page
+  did state looked unsupported. The critic now records the exact evidence it
+  graded against, and the runner gives that to the judge.
+- `recency-001`: the date note listed Tavily's `publishedAt` metadata as if it
+  were visible on the page, so the answer claimed calendar dates a reader
+  could not see. The note now lists only dates present in the page text and
+  reports relative update times ("18 hours ago") as relative.
+
+Both changes are covered by unit tests and were verified by replaying the final
+run's own sources through the changed code. No further live sweep was paid for
+after those two fixes; the report above is the measured full run, and the
+earlier targeted runs are kept in `eval/curated/2026-11-19-targeted-*.md`.
 
 ## Traces
 

@@ -270,6 +270,14 @@ function readSourcesFromTrace(traceDir: string, sessionId: string): string[] {
           add(result.url, result.content);
         }
       }
+      // The critic grades against the snippet plus the fetched page. A page
+      // can state a value the snippet omitted, and the judge needs the same
+      // evidence the guard had.
+      for (const line of lines.filter((l) => l.type === "critic")) {
+        for (const result of (line.sources ?? []) as Array<Record<string, unknown>>) {
+          add(result.url, result.text);
+        }
+      }
       return [...byUrl.entries()].map(([url, content]) => `${url} ${content}`);
     }
   }

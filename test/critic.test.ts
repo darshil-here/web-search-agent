@@ -280,6 +280,85 @@ test("ground appends a no-date note when no source has a date", async () => {
   assert.ok(result.note);
 });
 
+test("a relative update is noted instead of metadata dates", async () => {
+  const result = await ground(
+    llmReturning({
+      revisedAnswer: "Costs $20 [https://n.test].",
+      statements: [],
+    }),
+    "Costs $20.",
+    [
+      {
+        title: "N",
+        url: "https://n.test",
+        content: "Updated: 18 hours ago\nPrice: $20/month.",
+        pageText: null,
+        publishedAt: "Wed, 01 Feb 2023 00:00:00 GMT",
+      },
+    ],
+    "What is the price?"
+  );
+
+  assert.match(result.answer, /relative update time/i);
+  assert.match(result.answer, /18 hours ago/);
+  assert.doesNotMatch(result.answer, /2023/);
+});
+
+test("a date visible in the page text is still listed", async () => {
+  const result = await ground(
+    llmReturning({
+      revisedAnswer: "Costs $20 [https://n.test].",
+      statements: [],
+    }),
+    "Costs $20.",
+    [
+      {
+        title: "N",
+        url: "https://n.test",
+        content: "Updated 2026-11-04\nPrice: $20/month.",
+        pageText: null,
+        publishedAt: null,
+      },
+    ],
+    "What is the price?"
+  );
+
+  assert.match(result.answer, /2026-11-04/);
+});
+
+test("canonicalising a cleaned URL does not append its fragment twice", async () => {
+  const result = await ground(
+    llmReturning({
+      revisedAnswer: "Price: $20 [https://supabase.test/pricing#compare-plans].",
+      statements: [
+        {
+          text: "Price: $20",
+          url: "https://supabase.test/pricing",
+          quote: null,
+          supported: true,
+        },
+      ],
+    }),
+    "Price: $20.",
+    [
+      {
+        title: "S",
+        url: "https://supabase.test/pricing#compare-plans",
+        content: "Price: $20.",
+        pageText: null,
+        publishedAt: null,
+      },
+    ],
+    "What is the price?"
+  );
+
+  assert.equal(
+    result.answer.match(/#compare-plans/g)?.length,
+    1,
+    result.answer
+  );
+});
+
 test("ground keeps the original answer when the critic fails", async () => {
   const result = await ground(llmReturning({}, true), "Original.", sources, "Q");
   assert.equal(result.answer, "Original.");
