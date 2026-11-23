@@ -1,46 +1,130 @@
 # Design
 
-## How it works
+I built a chat agent with one tool, web search, and a memory that can answer
+questions about time: "what did I ask on 3 November", "has that price changed".
+The brief said the best architecture wins, so most of the work went into what
+happens between model calls, not into the interface.
 
-1. **User speaks.** `agent.ts` runs a stdin REPL (single-question mode also works). A `SESSION_ID` scopes the conversation.
-2. **Notebook recall — before the model sees the question.** `dates.ts` parses date references in the user's timezone; `notebook.ts` queries `db.ts` for turns on those dates, or the last 8 turns if none were named, and renders a `<notebook>` block capped at 4 KB. The session's open claims are appended after the turns (max 12), so the byte-budget trim drops old turns before current beliefs. A date with no turns produces a literal "No turns on YYYY-MM-DD", not silence. Nothing is written yet, so the model is never handed its own prompt as "memory."
-3. **Model + one tool.** `agent.ts` injects the notebook as a developer message plus the system prompt (with the current date rendered from `new Date()`), then hands the turn to `llm.ts`, which calls the OpenAI Responses API with one tool, `web_search` (Tavily, top 5 results trimmed to title/url/content). Tool calls run, results are appended as `function_call_output`, and the loop repeats up to `MAX_STEPS` (default 5).
-4. **Answer.** On a final response, the text is returned and saved. If the step budget is exhausted, the agent says so explicitly, reports the searches it ran, and exits non-zero — never a blank answer.
-5. **Turn saved.** `db.ts` stores both turns with `created_at` (UTC, for ordering) and `local_date` (in `USER_TZ`, for date matching), behind a versioned SQLite migration.
-6. **Claims recorded.** If the answer used search, `claims.ts` makes one structured-output call over the answer plus retrieved sources, extracts checkable facts (`subject / attribute / value / url / quote`), and reconciles them into the `claims` table. An identical fact is a no-op; a changed value closes the old row with `valid_until`/`superseded_by` and inserts a new one. The call is best-effort and traced, never fatal to the answer. No search means no call.
-7. **Temporal re-check.** A dated question that asks "still correct / changed since" is detected in code (`detect.ts`) *before* the model loop. `recheck.ts` pulls claims for that date, then searches every subject twice in parallel — once for the recorded attribute, once for "changelog / release notes / new features since DATE" — reads fresh values and any sourced notable change with one structured-output call, and injects a dated diff block plus a hard constraint: a `not_found` row is unverified and its recorded value must never be presented as current. The answer is written in one no-tool call from that diff; if the call returns nothing, `renderDiffAnswer` renders the same diff in code, so a re-check always produces a per-subject answer. Before answering, `recheck.ts` also checks the reported value against the retrieved text (`enforceValueInSources`) and downgrades a value no source states to `not_found` — the model cannot verify a claim by echoing it. `unverified.ts` then enforces that constraint in code, rewriting only the sentences that assert an unverified value as current; the rewrite keeps the value and its date, while hedged or merely historical mentions survive. Changed values supersede in the ledger; all checks are logged in `verifications`; every rewrite, the retrieved sources and the answer kind are traced.
+## The problem behind the search
 
-8. **Answer grounding.** A table- or number-heavy answer gets its sources fetched (`pages.ts`), their dates read (`source-date.ts`), and one critic call (`critic.ts`) that attaches a URL to every factual claim, quotes the sentence it relies on, and marks unsupported ones. `support.ts` then checks every numeric claim against the source cited beside it. Two tests decide support: the value must appear in a window around the feature words it is attached to, or a verbatim quote from that page must state both. A measure that spends its one following word on a unit ("5 GB", "6 hours") takes its feature from the next meaningful word ("object storage", "data changes") or, when only framing words follow ("per project per month"), from the row label. Framing words such as "project" and "month" never count as identity, because every pricing page mentions them. A currency amount is self-identifying, so "$0" on a Price row needs no separate "price" token. A row label is treated as a set of synonyms, so "Postgres storage" is satisfied by a page that says "storage", while a Traffic/egress row is not satisfied by a page that only mentions object storage. A bare number with no verified feature ("10" in a scraped plan grid) does not support a named quota ("10 branches"). Tables are graded cell by cell, so a valid Supabase URL on the same row cannot rescue a Neon cell, and a value the page states in feature-first order ("Edge function invocations | 500,000") is still recognised. Unsupported values are replaced with "not stated in sources"; in a table the whole clause is replaced, so a cell never reads "not stated in sources snapshot". Table cells whose claim is an absence ("No automatic backups") are also marked unless the cited page mentions the feature. Citation URLs are compared by host and path (`url.ts`), and fragments of one page are merged before grading, so a tracked variant of a fetched page keeps its citation instead of being stripped to an empty `[]`, and evidence in one excerpt is not hidden by another excerpt of the same page. The search snippet and the fetched page are unioned for the same reason. `scope.ts` then removes sentences volunteering concepts the user did not ask about. Simpler answers skip the fetch and critic but still state date visibility. All five steps are best-effort and traced.
-9. **Evals.** `eval/cases.ts` holds 18 cases from the brief, the LongMemEval taxonomy and the failure log. `npm run eval` probes the real pipeline with stubs; `npm run eval:live` runs the real CLI and judges answers against each case's rubric, with the retrieved sources, the memory lookup and the tool log shown to the judge. `EVAL_ONLY=id,...` runs a subset so a change can be checked without paying for a full sweep. The report records whether each answer came from the model or the deterministic fallback. The latest full sweep (2026-11-19) passed offline 18/18 and live 10/12. The two failures were both eval-visibility defects rather than wrong answers: the critic now traces the snippet + fetched page it graded against so the judge sees the same evidence, and the date note lists only dates present in page text (Tavily's `publishedAt` is metadata) plus relative update times. Both are unit-tested and were checked by replaying the final run's sources; no further paid sweep was run after those fixes. Results are reported as measured, not as intended.
+Search is the easy part. Tavily returns pages and the model writes a paragraph.
 
-**File ownership:** all modules live in `src/`; tests in `test/`; the acceptance set in `eval/`. `agent.ts` — CLI, per-turn control flow, system prompt. `llm.ts` — the Responses API boundary: structured output, the one-tool loop, usage and events. `db.ts` — persistence and retrieval queries for turns, claims and verifications. `config.ts` — every environment variable, read and validated once at startup. `notebook.ts` — what turn memory is injected and its byte budget. `claims.ts` — fact extraction and ledger reconciliation. `concepts.ts` — the sibling-concept vocabulary shared by extraction, the ledger and the re-check guard. `detect.ts` — pure re-check detection. `recheck.ts` — the temporal re-check pipeline. `pages.ts` — Tavily page extraction and URL selection. `source-date.ts` — publication-date parsing. `critic.ts` — answer grounding. `support.ts` — checks grounded numeric and absence claims against retrieved text. `url.ts` — page identity for citation checks. `scope.ts` — deterministic scope enforcement. `dates.ts` — pure time math and date-reference parsing. `search.ts` — the one web-search call. `text.ts` — shared string shaping for prompts, columns and tables. `trace.ts` — per-run `.md`/`.jsonl` traces (tokens, latency, searches, sources, notebook, claims, re-check, verdict). `unverified.ts` — deterministic guard against stating an unverified value as current; `enforceValueInSources` in `recheck.ts` keeps a model from verifying a claim against its own echo. `support.ts` — checks grounded numeric claims against retrieved text.
+The hard part is that a chat agent forgets, and the usual fix, pasting the whole
+transcript into the prompt, fails the moment someone asks about a specific day.
+It also gives the model no way to tell a fact it saw last week from one it saw
+last year.
 
-## Why I built it this way
+So I split memory in two. Turns are the transcript: who said what, when, stored
+with a UTC timestamp for ordering and a local date for matching. Claims are
+facts: subject, attribute, value, URL, quote, and a validity interval. A new
+observation closes the old row with `valid_until` and `superseded_by`, then
+inserts a new one. Nothing is overwritten.
 
-- **Pipeline, not autonomous agent.** A fixed recall → call → tool → answer loop is predictable and fast. The model never decides *whether* to think or search; it only decides *what query*. Bounded steps and a 4 KB notebook bound both latency and cost, which is what "answers fast" actually requires. A failed bound is reported, not hidden.
-- **One tool, memory as retrieval.** Recall is a deterministic pre-model step, not a tool the model can call. This honors the "one tool: web search" rule honestly while still giving the agent memory — and it means abstention is grounded in a real empty query result rather than the model's imagination.
-- **`local_date` + UTC.** Storing only UTC timestamps makes "what did I ask on 3 November" wrong for 5.5 hours a day in IST. `created_at` orders; `local_date` matches. All date parsing is pure and timezone-aware so the prompt, the notebook, and recall agree on what "today" means.
-- **Dynamic date injection.** The system prompt states today's date from the clock, not the model's memory. A logged failure (searching "Node.js version 2024") disappeared after this. Rules name *stale* years, not all years, so freshness isn't accidentally forbidden.
-- **Traces as a first-class layer.** Every run records its prompt hash, per-step cost/latency, queries, sources, injected memory, and a verdict. That is how the failure log and every fix claim are evidence-backed rather than vibes.
-- **A claim ledger, not bigger memory.** Turn text tells you what was said; it cannot answer "has it changed". Storing facts as validity intervals — never overwriting, only superseding — is the Zep-style model that makes staleness a query the code can answer. Extraction is one traced pipeline call, not a second tool, so the single-tool rule still holds. It is best-effort and skipped when no search happened, so it does not tax latency or cost on questions with no external facts.
-- **Re-check is deterministic where it matters.** Deciding *whether* to re-check and *which* claims to test is code, not a model guess. The model is only asked to write the answer from a diff it cannot silently omit: unchanged and not-found rows are rendered too, and every check gets a verification row. That is the same reasoning as memory-as-retrieval — trust code for discipline, the model for language.
-- **The model boundary trusts the API, not a slug list.** `llm.ts` retries once without `reasoning` when the API rejects it with a 400, so a new model slug cannot silently break every call. The retry is traced rather than hidden.
-- **Grounding is a pipeline concern.** The model writes prose; code decides which URLs exist and which sentences violate scope. F-005 was a prompt rule the model followed intermittently, so it is now a pure function. Likewise, the critic can propose citations but code strips any URL that was not actually retrieved. The critic runs only on table/number-heavy answers so simple questions stay fast; date visibility is stated on every sourced answer because source selection is not yet reliable.
-- **"Not found" is not "unchanged", and code says so.** F-011 showed the model quoting an unverified recorded price as current even with the diff in front of it. The answer call now gets a hard constraint and `unverified.ts` rewrites only sentences that assert currency; a past-tense mention or an explicit hedge survives, because the first tightening destroyed the recalled question in brief-2. The answer call never gets a tool: the per-subject searches already ran, and letting it search again burned its whole budget and returned nothing (F-013). If the model still writes nothing, the diff is rendered in code rather than shown as an empty answer. The same reason as scope and calibration: trust code for discipline, the model for language.
+That second table is the design. Once facts have validity intervals, "has it
+changed since then" stops being a prompt trick and becomes a query.
 
-## What I considered and rejected
+## The turn pipeline
 
-- **A bigger prompt holding all history.** Unbounded tokens, slower first step on every question, and no clean way to answer "on 3 November." The 4 KB notebook with explicit "no turns" statements does the same job for a fraction of the cost.
-- **Giving the model a memory tool.** It would violate the single-tool rule and turn abstention into a model decision. Retrieval before the call keeps the rule intact and the behavior deterministic.
-- **A framework (LangChain, CrewAI, etc.).** Orchestration libraries hide the exact parts being graded — memory model, staleness logic, failure behavior. A hand-written loop keeps every decision explainable, which the brief explicitly requires.
+Every turn is the same four stages, in code, in `agent.ts`.
 
-## What I'd do with another week
+1. Recall. Build a notebook from SQLite: the turns for a date you named, or the
+   last few, plus current claims. Cap it at 4 KB and say when turns were
+   dropped.
+2. Route. `detect.ts` decides from the text whether this is a dated re-check.
+   No classifier call, no extra latency.
+3. Answer. Either the normal loop or the re-check path.
+4. Remember. Extract claims from sourced answers, best effort, never fatal.
 
-The brief's examples are temporal questions, and the ledger plus re-check path now answer them. Remaining work:
+The normal loop gives the model exactly one tool, `web_search`, and five steps.
+Code ranks sources by freshness before the model sees them. If an answer has a
+table or three or more numbers, a grounding pass fetches the cited pages and
+checks each value against the text beside its citation. Anything the page does
+not state becomes "not stated in sources".
 
-- **Wider detection.** The detector covers the phrasing in the brief and close variants. An LLM classifier could catch more, at the cost of a call on every turn — measure first.
-- **Re-attribution when the citation is wrong but the value is right.** `support.ts` marks a value the cited page does not state, even when another retrieved page does state it. That is honest but can withhold a true value because the critic attached the wrong URL. A next step is to look for the value across the retrieved set and attach that source, or say which source does state it.
-- **Judge stability.** The live evaluator is sensitive to which sources Tavily returns; the same code has scored between 7/12 and 10/12. Pinning a source snapshot or scoring per-rubric-item rather than whole answers would make regressions easier to read.
-- **Curated-trace drift.** The committed traces are a snapshot; new failures should add their own curated evidence rather than reusing old citations.
+The re-check path is deliberately not an agent. It pulls the claims recorded on
+the named date, searches each subject twice (the recorded attribute, then
+changelog or release notes), and compares the fresh values in code. The answer
+call gets no tools. Letting it search again meant it could spend the whole
+budget searching and return nothing. If the call returns no text, code renders
+the diff itself, so a re-check always answers.
 
----
+If the named date has no claims, the pipeline does not pretend to re-check. It
+falls through to the normal path, which says there is no record for that date
+and asks for the missing detail. A new user hits this on the brief's own
+examples, so it has to be right.
+
+## Why a pipeline and not an autonomous agent
+
+An autonomous loop is more fun to demo and worse to reason about. I wanted the
+control flow readable in one file: recall, route, answer, remember. The model
+decides what to search. It does not decide whether to think, how much memory to
+load, or whether a value is supported.
+
+The same reason put the guards in functions instead of the system prompt.
+`support.ts` grades each numeric claim against the cited page. `unverified.ts`
+rewrites a sentence that presents an unverified value as current.
+`calibration.ts` hedges absolute claims no source supports. `scope.ts` removes
+sentences about concepts the user did not ask about. Prompts drift. Functions
+have tests.
+
+## Three failures behind the guards
+
+- A re-check once recorded `unchanged` for "latest stable" because extraction
+  had collapsed it into "latest LTS" and the fresh source only described LTS.
+  `claims.ts` now anchors the attribute to the question, and `recheck.ts`
+  downgrades a mismatched attribute to `not_found`.
+- A re-check once presented a recorded $19/month as the current price with no
+  retrieved source behind it. `enforceValueInSources` drops a value no source
+  states, and `unverified.ts` rewrites only the sentences that assert it as
+  current.
+- A re-check once spent its whole answer budget on more searches and returned an
+  empty answer with exit code 0. The answer call now gets no tools, and if it
+  still returns nothing, code renders the per-subject diff.
+
+Each one was a wrong answer a judge caught, and each is now a guard with a test.
+
+## Timezones
+
+This one is small and easy to get wrong. If I stored only UTC, "what did I ask
+on 3 November" would be wrong for five and a half hours a day in IST. So every
+turn and claim stores `created_at` for ordering and `local_date` for matching,
+and all date parsing goes through `USER_TZ`. The cost is one extra column. The
+alternative is a bug that only appears at 5:30am.
+
+## What I rejected
+
+**The whole transcript in the prompt.** Unbounded tokens, a slower first step,
+and still no clean answer to a date question.
+
+**A memory tool.** It breaks the one-tool rule and turns abstention into a model
+guess. Recall is a pre-model step so the model cannot skip it.
+
+**A framework.** LangChain or CrewAI would hide the memory model, the staleness
+logic and the failure behavior. Those are the parts being judged.
+
+**Embeddings for recall.** The questions I need to answer are about dates and
+subjects, not semantic similarity. SQL is exact and debuggable. I would reach
+for vectors only if the eval showed recall failing on paraphrase, and it has
+not.
+
+## What is weak
+
+Re-check detection is regex, so it catches the phrasings I tested and misses
+others. Entity resolution is string matching, so "Postgres hosting" and
+"Postgres" can become different subjects. The live judge is noisy: the same code
+has scored between 8/12 and 11/12 across sweeps, depending on what Tavily
+returned that day. Cold start is honest but unhelpful. If you name a date before
+the conversation has facts, the agent can only ask for the context it is
+missing.
+
+## Another week
+
+I would measure a model-based intent classifier against the regex before adding
+it, since the current path costs nothing. I would add entity aliasing in the
+ledger. I would fix re-attribution, where a correct value is withheld because
+the critic cited the wrong page. And I would pin a source snapshot for the live
+eval, so a score change means a code change and not a different search result.
+
+The acceptance set is `eval/cases.ts`; every bug that became a guard has a
+regression case there. `npm run eval` runs it with stubs and `npm run eval:live`
+runs it through the real model.

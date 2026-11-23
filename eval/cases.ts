@@ -1,7 +1,7 @@
 // eval/cases.ts
 //
 // The acceptance set. Every case names the source it came from (the brief, a
-// LongMemEval category, or a logged failure) and carries two things:
+// LongMemEval category, or a bug found while building) and carries two things:
 //   probe — a deterministic observation of the real pipeline, with stubbed
 //           model and search, so the offline runner is free and repeatable;
 //   rubric — what a good *answer* must and must not say, used by the live judge.
