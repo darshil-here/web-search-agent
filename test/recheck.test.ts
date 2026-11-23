@@ -6,6 +6,7 @@ import { rmSync } from "node:fs";
 import {
   openClaim,
   openDb,
+  saveClaim,
   verificationsForClaim,
   type Claim,
 } from "../src/db.js";
@@ -70,6 +71,20 @@ test("buildQueries makes one query per distinct subject", () => {
   assert.equal(queries.length, 2);
   assert.match(queries[0], /Neon free tier/);
   assert.match(queries[0], /storage/);
+});
+
+test("a claim with no subject or attribute is never a search query", () => {
+  const claims = [
+    c(1, "", "price", "$10", "2026-11-17"),
+    c(2, "   ", "price", "$10", "2026-11-17"),
+    c(3, "Neon", "", "$10", "2026-11-17"),
+    c(4, "Neon", "price", "$10", "2026-11-17"),
+  ];
+
+  assert.deepEqual(buildQueries(claims), ["Neon price"]);
+  assert.deepEqual(buildChangeQueries(claims, "2026-11-17"), [
+    "Neon changelog OR release notes OR new features since 2026-11-17",
+  ]);
 });
 
 test("buildChangeQueries makes one change query per subject with the date", () => {
@@ -285,6 +300,40 @@ test("unchanged writes only a verification; not_found leaves the claim open", ()
 });
 
 // --- orchestration ----------------------------------------------------------
+
+test("an incomplete recorded claim is stated, not searched as an empty query", async () => {
+  const db = freshDb();
+  saveClaim(db, {
+    sessionId: "s",
+    subject: "",
+    attribute: "price",
+    value: "$10",
+    url: null,
+    quote: null,
+    observedAt: NOW.toISOString(),
+    localDate: "2026-11-17",
+  });
+
+  let searches = 0;
+  const report = await recheck({
+    ctx: { db, sessionId: "s", timeZone: IST },
+    intent: { date: "2026-11-17", phrase: "still correct" },
+    userText: "Is that still correct?",
+    now: NOW,
+    llm: stubLlm({ results: [] }),
+    instructions: "You are a research assistant.",
+    maxSearches: 8,
+    search: async () => {
+      searches++;
+      return [];
+    },
+  });
+
+  assert.equal(searches, 0);
+  assert.equal(report.queries.length, 0);
+  assert.match(report.answer, /missing a subject or attribute/);
+  db.close();
+});
 
 test("an empty answer text falls back to a deterministic re-check answer", async () => {
   const db = freshDb();

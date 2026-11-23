@@ -13,7 +13,7 @@
     "typecheck": "tsc --noEmit",
     "test": "tsx --test",
     "db:check": "tsx scripts/db-check.ts",
-    "db:reset": "rm -f data/agent.db data/agent.db-wal data/agent.db-shm",
+    "db:reset": "rm -f data/*.db data/*.db-wal data/*.db-shm",
     "eval": "tsx eval/cli.ts",
     "eval:live": "tsx eval/cli.ts --live"
   },

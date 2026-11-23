@@ -174,9 +174,12 @@ test("the notebook respects its byte budget and says what it dropped", () => {
   );
   assert.equal(notebook.truncated, true);
   assert.match(notebook.text, /omitted to fit the notebook budget/);
-  // The newest turn survives; the oldest is what gets dropped.
+  // The question that opened the thread is the anchor a recall answer quotes,
+  // so it survives even though it is the oldest turn. The newest turn survives
+  // too; an early answer is what gets dropped.
+  assert.match(notebook.text, /question 0 /);
   assert.match(notebook.text, /answer 39/);
-  assert.doesNotMatch(notebook.text, /question 0 /);
+  assert.doesNotMatch(notebook.text, /answer 0 /);
   db.close();
 });
 

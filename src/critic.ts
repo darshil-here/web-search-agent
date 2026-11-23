@@ -24,12 +24,20 @@ export type GroundResult = {
 };
 
 const NUMBER = /\b\d+(?:\.\d+)?\b/g;
+const YEAR = /^(?:19|20)\d{2}$/;
 
 export function needsGrounding(answer: string): boolean {
   const hasTable = answer
     .split("\n")
     .some((line) => line.trimStart().startsWith("|"));
-  const numbers = new Set(answer.match(NUMBER) ?? []);
+  // A calendar year is not a measurement. Counting years made a simple
+  // "as of 2026, the latest version is v26.13.1" answer look like a
+  // number-heavy answer, so it fetched pages and rewrote the version. Ground
+  // tables and answers with several real measures; leave one-claim answers
+  // to the model's citation.
+  const numbers = new Set(
+    (answer.match(NUMBER) ?? []).filter((value) => !YEAR.test(value))
+  );
   return hasTable || numbers.size >= 3;
 }
 

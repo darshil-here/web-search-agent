@@ -32,6 +32,15 @@ test("needsGrounding is true for tables and number-heavy prose", () => {
   assert.equal(needsGrounding("One is 10 GB, two is 20 GB, three is 30 GB."), true);
 });
 
+test("needsGrounding ignores years in a single-claim answer", () => {
+  assert.equal(
+    needsGrounding(
+      "As of November 2026, the latest stable Node.js release is v26.13.1 [https://nodejs.org]."
+    ),
+    false
+  );
+});
+
 test("needsGrounding is false for plain prose", () => {
   assert.equal(needsGrounding("I do not know the answer."), false);
   assert.equal(needsGrounding("It costs $10 per month."), false);

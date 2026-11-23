@@ -54,9 +54,16 @@ function claimLine(claim: Claim): string {
   );
 }
 
+/**
+ * A block of notebook text. `anchor` blocks are the ones a recall answer is
+ * built from — the date heading and the first question asked in that window —
+ * so they are the last to be dropped when the budget bites.
+ */
+type Block = { text: string; anchor?: boolean };
+
 function render(
   header: string,
-  blocks: string[]
+  blocks: Block[]
 ): { text: string; truncated: boolean } {
   const kept = [...blocks];
   let truncated = false;
@@ -64,18 +71,22 @@ function render(
   const build = (): string => {
     const lines = ["<notebook>", header];
     if (truncated) {
-      lines.push("(Earlier turns omitted to fit the notebook budget.)");
+      lines.push("(Some earlier content omitted to fit the notebook budget.)");
     }
-    lines.push(...kept, "</notebook>");
+    lines.push(...kept.map((block) => block.text), "</notebook>");
     return lines.join("\n");
   };
 
-  // Drop whole blocks from the oldest end. A turn is never half-injected.
+  // Drop whole blocks. A turn is never half-injected. Plain turns go first,
+  // oldest first, so the newest state survives; the anchors (the question a
+  // recall answer quotes) are dropped only when nothing else is left and the
+  // budget still does not fit.
   while (
     kept.length > 0 &&
     Buffer.byteLength(build(), "utf8") > NOTEBOOK_MAX_BYTES
   ) {
-    kept.shift();
+    const plain = kept.findIndex((block) => !block.anchor);
+    kept.splice(plain === -1 ? 0 : plain, 1);
     truncated = true;
   }
 
@@ -88,9 +99,21 @@ export function buildNotebook(
   now: Date
 ): Notebook {
   const refs = parseDateRefs(userText, now, ctx.timeZone);
-  const blocks: string[] = [];
+  const blocks: Block[] = [];
   const dates: string[] = [];
   let rows = 0;
+
+  // The first question in each window is the thing a recall answer quotes, so
+  // it is the one turn the byte budget must not drop. Later turns are ordinary
+  // blocks: the newest survive simply because the oldest go first.
+  const turnBlocks = (turns: Turn[]): Block[] => {
+    let anchored = false;
+    return turns.map((turn) => {
+      const anchor = !anchored && turn.role === "user";
+      if (anchor) anchored = true;
+      return { text: turnLine(turn), anchor };
+    });
+  };
 
   if (refs.length > 0) {
     for (const ref of refs) {
@@ -100,30 +123,39 @@ export function buildNotebook(
 
       if (turns.length === 0) {
         // Stated, not omitted. Silence invites the model to fill the gap.
-        blocks.push(`No turns on ${ref.date} (${ref.label}).`);
+        blocks.push({
+          text: `No turns on ${ref.date} (${ref.label}).`,
+          anchor: true,
+        });
         continue;
       }
 
-      blocks.push(`Turns on ${ref.date} (${ref.label}):`);
-      for (const turn of turns) blocks.push(turnLine(turn));
+      blocks.push({
+        text: `Turns on ${ref.date} (${ref.label}):`,
+        anchor: true,
+      });
+      blocks.push(...turnBlocks(turns));
     }
   } else {
     const turns = recentTurns(ctx.db, ctx.sessionId, RECENT_TURNS);
     rows = turns.length;
 
     if (turns.length === 0) {
-      blocks.push("No earlier turns.");
+      blocks.push({ text: "No earlier turns.", anchor: true });
     } else {
-      blocks.push(`Last ${turns.length} turns, oldest first:`);
-      for (const turn of turns) blocks.push(turnLine(turn));
+      blocks.push({
+        text: `Last ${turns.length} turns, oldest first:`,
+        anchor: true,
+      });
+      blocks.push(...turnBlocks(turns));
     }
   }
 
   // Appended last so the budget trims old turns before current beliefs.
   const beliefs = openClaims(ctx.db, ctx.sessionId).slice(0, MAX_CLAIMS);
   if (beliefs.length > 0) {
-    blocks.push("Current beliefs recorded in this conversation:");
-    for (const belief of beliefs) blocks.push(claimLine(belief));
+    blocks.push({ text: "Current beliefs recorded in this conversation:" });
+    for (const belief of beliefs) blocks.push({ text: claimLine(belief) });
   }
 
   const header =

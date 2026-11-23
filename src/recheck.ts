@@ -67,13 +67,26 @@ not claim the earlier answer is still correct. For every row whose status is
 changed or unchanged, put the source URL beside the value you state. A change
 without a URL is not usable evidence.`;
 
+/**
+ * A claim is only checkable when both halves of its key are present. The
+ * extractor already drops empty fields, but the ledger is a plain table: a
+ * seeded, legacy or hand-written row can still have neither. Left in, such a
+ * row turns into an empty search query and a meaningless diff.
+ */
+function isCheckable(claim: Claim): boolean {
+  return claim.subject.trim() !== "" && claim.attribute.trim() !== "";
+}
+
 export function buildQueries(claims: Claim[]): string[] {
   const seen = new Set<string>();
   const out: string[] = [];
   for (const claim of claims) {
-    if (seen.has(claim.subject)) continue;
-    seen.add(claim.subject);
-    out.push(`${claim.subject} ${claim.attribute}`.trim());
+    if (!isCheckable(claim)) continue;
+    const subject = claim.subject.trim();
+    const attribute = claim.attribute.trim();
+    if (seen.has(subject)) continue;
+    seen.add(subject);
+    out.push(`${subject} ${attribute}`.trim());
   }
   return out;
 }
@@ -88,10 +101,12 @@ export function buildChangeQueries(claims: Claim[], date: string): string[] {
   const seen = new Set<string>();
   const out: string[] = [];
   for (const claim of claims) {
-    if (seen.has(claim.subject)) continue;
-    seen.add(claim.subject);
+    if (!isCheckable(claim)) continue;
+    const subject = claim.subject.trim();
+    if (seen.has(subject)) continue;
+    seen.add(subject);
     out.push(
-      `${claim.subject} changelog OR release notes OR new features since ${date}`
+      `${subject} changelog OR release notes OR new features since ${date}`
     );
   }
   return out;
@@ -678,13 +693,17 @@ export async function recheck(args: {
   // user's premise was wrong ("last Tuesday I asked about Postgres" with only
   // a Node.js fact in the ledger), so the caller decides whether to take this
   // path at all; here an empty date means there is nothing to compare.
-  const claims = claimsForDate(ctx.db, ctx.sessionId, intent.date);
+  const recorded = claimsForDate(ctx.db, ctx.sessionId, intent.date);
+  const claims = recorded.filter(isCheckable);
   const attributeQueries = buildQueries(claims);
   const changeQueries = buildChangeQueries(claims, intent.date);
 
-  if (claims.length === 0 || attributeQueries.length === 0) {
+  if (claims.length === 0) {
     return newReport(intent, {
-      answer: `I have no prior claim recorded for ${intent.date}, so there is nothing to re-check.`,
+      answer:
+        recorded.length === 0
+          ? `I have no prior claim recorded for ${intent.date}, so there is nothing to re-check.`
+          : `I have a claim recorded for ${intent.date}, but it is missing a subject or attribute, so there is nothing to re-check.`,
     });
   }
 

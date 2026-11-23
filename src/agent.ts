@@ -453,8 +453,13 @@ async function turn(
     // source if it sees it first, so rank before any of the answer post-steps.
     const rankedSources = rankByFreshness(sources);
     let answer = result.text;
+    // Decide once, from the model's answer. The date note added below contains
+    // calendar numbers, and re-checking `needsGrounding` after appending it made
+    // every simple sourced answer fetch pages and run the critic, just because
+    // the code had added a date to it.
+    const shouldGround = needsGrounding(answer);
 
-    if (answer.trim() !== "" && rankedSources.length > 0 && !needsGrounding(answer)) {
+    if (answer.trim() !== "" && rankedSources.length > 0 && !shouldGround) {
       // The critic is skipped for simple answers, but F-006 still requires a
       // statement about date visibility. Snippets alone are enough to decide
       // this, so no page fetch or model call is needed on the fast path.
@@ -493,7 +498,7 @@ async function turn(
     if (
       answer.trim() !== "" &&
       rankedSources.length > 0 &&
-      needsGrounding(answer)
+      shouldGround
     ) {
       checkpoint();
       const urls = selectUrls(rankedSources, 2, config.maxPageFetches);
@@ -557,6 +562,11 @@ async function turn(
     tracer.log("\nFINAL:\n" + finalAnswer);
     if (finalAnswer.trim() !== "") {
       checkpoint();
+      // The answer is final here. Claim extraction is a separate model call
+      // that can take seconds, and the user is waiting on text that is already
+      // done. Show it now; `done` still waits for the ledger, so the next turn
+      // sees the same facts.
+      hooks.emit?.({ type: "delta", text: finalAnswer });
       if (sources.length > 0) status("claims", "Extracting claims to remember");
       const recorded = await ledger(
         ctx,
@@ -642,10 +652,11 @@ async function chat(ctx: SessionContext): Promise<void> {
 }
 
 /**
- * The per-turn pipeline as a library call. Emits `status` while it works, then
- * one `delta` with the final text (the model call is not streamed and the
- * answer is rewritten by the grounding guards, so the finished text is the only
- * honest thing to show) and `done`. Throws on failure; no `done` is emitted.
+ * The per-turn pipeline as a library call. Emits `status` while it works, one
+ * `delta` as soon as the guarded answer is ready, then `done` after the ledger
+ * write. The model call is not streamed and the guards rewrite the text, so the
+ * guarded answer is the first honest thing to show. Throws on failure; no
+ * `done` is emitted.
  */
 export async function runTurn(args: {
   sessionId: string;
@@ -665,14 +676,20 @@ export async function runTurn(args: {
     sessionId: args.sessionId,
     timeZone: config.timeZone,
   };
+  let answerSent = false;
   const result = await turn(args.message, ctx, {
-    emit: args.onEvent,
+    emit: (event) => {
+      if (event.type === "delta") answerSent = true;
+      args.onEvent?.(event);
+    },
     signal: args.signal,
     command: args.command,
   });
   const ms = Math.round(performance.now() - started);
 
-  if (result.answer.trim() !== "") {
+  // Budget and re-check paths answer without a ledger, so they reach here
+  // without a delta. The normal path already emitted its answer above.
+  if (!answerSent && result.answer.trim() !== "") {
     args.onEvent?.({ type: "delta", text: result.answer });
   }
   args.onEvent?.({
