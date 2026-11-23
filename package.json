@@ -2,11 +2,14 @@
   "name": "web-search-agent",
   "version": "1.0.0",
   "type": "module",
+  "engines": {
+    "node": ">=20.12"
+  },
   "scripts": {
-    "start": "tsx --env-file=.env src/agent.ts",
-    "dev": "tsx --env-file=.env src/agent.ts",
-    "web": "tsx --env-file=.env src/server.ts",
-    "trace": "npm start --",
+    "dev": "tsx src/server.ts",
+    "web": "tsx src/server.ts",
+    "chat": "tsx src/agent.ts",
+    "start": "tsx src/agent.ts",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test",
     "db:check": "tsx scripts/db-check.ts",

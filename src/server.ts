@@ -2,6 +2,7 @@
 // every chat request is one `runTurn` call, and its events are written out as
 // server-sent events. `agent.ts` is imported dynamically in the entry block so
 // that `createApp` can be tested without model or search keys.
+import "./env.js";
 import { createReadStream, realpathSync } from "node:fs";
 import {
   createServer,
@@ -301,7 +302,17 @@ function isEntryPoint(): boolean {
 }
 
 if (isEntryPoint()) {
-  const agent = await import("./agent.js");
+  let agent: typeof import("./agent.js");
+  try {
+    agent = await import("./agent.js");
+  } catch (err) {
+    // The common failure is a missing key. Print the message, not a stack.
+    console.error(
+      `\nCould not start: ${err instanceof Error ? err.message : String(err)}\n`
+    );
+    process.exit(1);
+  }
+
   const root = join(dirname(fileURLToPath(import.meta.url)), "..");
   const port = Number(process.env.PORT ?? 3000);
   const db = agent.getDb();
@@ -312,7 +323,7 @@ if (isEntryPoint()) {
     defaultSessionId: agent.config.sessionId,
     runTurn: agent.runTurn,
     webDir: join(root, "web"),
-    phoneImagePath: join(root, "iPhone 16 Pro - White Titanium - Portrait.png"),
+    phoneImagePath: join(root, "iPhoneMockup.png"),
   });
 
   server.on("error", (err: NodeJS.ErrnoException) => {

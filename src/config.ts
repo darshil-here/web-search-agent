@@ -18,7 +18,11 @@ export type Config = {
 
 function requireEnv(env: NodeJS.ProcessEnv, name: string): string {
   const value = env[name];
-  if (!value) throw new Error(`${name} is not set`);
+  if (!value) {
+    throw new Error(
+      `${name} is not set. Copy .env.example to .env and add your keys.`
+    );
+  }
   return value;
 }
 
