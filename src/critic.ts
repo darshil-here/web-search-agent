@@ -5,6 +5,7 @@
 // URLs and marks unsupported claims; the model never gets a new tool.
 import type { Llm, Usage } from "./llm.js";
 import type { EnrichedSource } from "./search.js";
+import { expandInlineTables } from "./markdown.js";
 import { extractSourceDate, relativeDateMention } from "./source-date.js";
 import { guardValueSupport, isVerbatimQuote, type SupportEvidence } from "./support.js";
 import { canonicalUrl } from "./url.js";
@@ -128,7 +129,7 @@ export async function ground(
       input: `QUESTION:\n${question}\n\nANSWER:\n${answer}\n\nSOURCES:\n${sourceBlock}`,
     });
 
-    let revised = data.revisedAnswer || answer;
+    let revised = expandInlineTables(data.revisedAnswer || answer);
     // A URL the critic wrote that canonicalises to a retrieved page (tracking
     // query, www, .md) is the same evidence: point the answer at the URL we
     // actually fetched instead of stripping it. A URL we never retrieved is

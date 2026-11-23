@@ -1,12 +1,18 @@
 // The CLI and the per-turn control flow: recall, choose a path, answer, finish.
 // Everything with a second caller lives in the modules below this one.
+import "./env.js";
 import { realpathSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { pathToFileURL } from "node:url";
 import type Database from "better-sqlite3";
 import OpenAI from "openai";
 import { loadConfig } from "./config.js";
-import { appendTurn, openDb, type SessionContext } from "./db.js";
+import {
+  appendTurn,
+  claimsForDate,
+  openDb,
+  type SessionContext,
+} from "./db.js";
 import { extractClaims, recordClaims } from "./claims.js";
 import { detectRecheck } from "./detect.js";
 import { recheck, type AnswerKind } from "./recheck.js";
@@ -24,6 +30,7 @@ import { extractSourceDate, relativeDateMention } from "./source-date.js";
 import { ground, needsGrounding } from "./critic.js";
 import { guardScope } from "./scope.js";
 import { guardCalibration } from "./calibration.js";
+import { expandInlineTables } from "./markdown.js";
 import { promptVersion, Tracer } from "./trace.js";
 
 export const config = loadConfig();
@@ -301,7 +308,24 @@ async function turn(
     // Temporal questions take a dedicated, deterministic path. It stays inside
     // the try so the finally below always flushes the trace.
     const intent = detectRecheck(userText, now, ctx.timeZone);
-    if (intent) {
+    // A re-check compares facts recorded on the named date. With no claims for
+    // that date there is nothing to compare, so let the ordinary path answer
+    // from the notebook ("I have no record of that") instead of announcing a
+    // re-check that cannot run. A new user hits this first: the brief's
+    // examples name a date before the conversation contains one.
+    const datedClaims = intent
+      ? claimsForDate(ctx.db, ctx.sessionId, intent.date)
+      : [];
+    if (intent && datedClaims.length === 0) {
+      status(
+        "recheck",
+        `No facts recorded on ${intent.date}; answering from the conversation`
+      );
+      tracer.log(
+        `\nRE-CHECK SKIPPED: no claims observed on ${intent.date}; ordinary path.`
+      );
+    }
+    if (intent && datedClaims.length > 0) {
       status(
         "recheck",
         `Re-check: comparing earlier answers for ${intent.date}`
@@ -335,11 +359,8 @@ async function turn(
         );
       }
 
-      const answer = withRecalledQuestion(
-        ctx,
-        report.intent.date,
-        userText,
-        report.answer
+      const answer = expandInlineTables(
+        withRecalledQuestion(ctx, report.intent.date, userText, report.answer)
       );
       report.answer = answer;
       for (const call of report.llmCalls) tracer.llmCall(call);
@@ -530,14 +551,17 @@ async function turn(
     const scoped = guardScope(userText, answer);
     tracer.scope(scoped);
 
-    tracer.log("\nFINAL:\n" + scoped.answer);
-    if (scoped.answer.trim() !== "") {
+    // A model can return a table on one line. Give the trace, the ledger and
+    // the web renderer the row-per-line shape they expect.
+    const finalAnswer = expandInlineTables(scoped.answer);
+    tracer.log("\nFINAL:\n" + finalAnswer);
+    if (finalAnswer.trim() !== "") {
       checkpoint();
       if (sources.length > 0) status("claims", "Extracting claims to remember");
       const recorded = await ledger(
         ctx,
         tracer,
-        scoped.answer,
+        finalAnswer,
         sources,
         now,
         userText
@@ -564,7 +588,7 @@ async function turn(
     return conclude(
       ctx,
       tracer,
-      scoped.answer,
+      finalAnswer,
       "answered",
       modelCalls,
       runStart,

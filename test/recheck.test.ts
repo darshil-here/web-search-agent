@@ -562,56 +562,36 @@ test("markdown bullets count as one clause per vendor", async () => {
   db.close();
 });
 
-test("recheck falls back to open claims when the named date is empty", async () => {
+test("recheck does not check a claim observed on another date", async () => {
   const db = freshDb();
-  const claim = recordClaims(
-    db, "s", [extracted("Node.js", "latest LTS release", "v26.13.1")], NOW, IST
-  ).claims[0];
-  const searches: string[] = [];
+  recordClaims(
+    db,
+    "s",
+    [extracted("Node.js", "latest LTS release", "v26.13.1")],
+    NOW,
+    IST
+  );
+  let called = false;
 
   const report = await recheck({
     ctx: { db, sessionId: "s", timeZone: IST },
     intent: { date: "2026-11-03", phrase: "still correct" },
     userText: "What did I ask on 3 November? Is your answer still correct today?",
     now: NOW,
-    llm: stubLlm(
-      {
-        results: [
-          {
-            claimId: claim.id,
-            value: "v26.13.1",
-            url: "https://nodejs.org/en/download",
-            quote: "v26.13.1 Latest LTS",
-            status: "unchanged",
-          },
-        ],
-      },
-      "No change: v26.13.1 is still the latest LTS."
-    ),
+    llm: stubLlm({ results: [] }),
     instructions: "You are a research assistant.",
-    search: async (query) => {
-      searches.push(query);
-      return [
-        {
-          title: "Node",
-          url: "https://nodejs.org/en/download",
-          content: "v26.13.1 Latest LTS",
-        },
-      ];
+    search: async () => {
+      called = true;
+      return [];
     },
     maxSearches: 8,
   });
 
-  assert.equal(report.claimsChecked, 1);
-  // One attribute query plus one change query: "still correct" also needs
-  // release notes, not just the page that held the old value.
-  assert.equal(searches.length, 2);
-  assert.match(searches[0], /latest LTS release/);
-  assert.match(searches[1], /changelog|release notes/);
-  assert.equal(report.fresh[0].status, "unchanged");
-  assert.equal(report.writeBack.verifications, 1);
-  assert.equal(report.stopReason, "answered");
-  assert.equal(report.llmCalls[0].label, "extract");
+  // A fact recorded on 17 November says nothing about what was asked on the
+  // 3rd. Re-checking it would answer a question the user did not ask.
+  assert.equal(called, false);
+  assert.equal(report.claimsChecked, 0);
+  assert.match(report.answer, /no prior claim/i);
   db.close();
 });
 
@@ -1116,7 +1096,11 @@ test("a failed extraction is reported and leaves every claim not_found", async (
 test("an answer that ignores the diff is rewritten to an honest statement", async () => {
   const db = freshDb();
   const claim = recordClaims(
-    db, "s", [extracted("Postgres hosting", "price", "$19/month")], NOW, IST
+    db,
+    "s",
+    [extracted("Postgres hosting", "price", "$19/month")],
+    new Date("2026-11-10T06:00:00Z"),
+    IST
   ).claims[0];
 
   const llm: Llm = {

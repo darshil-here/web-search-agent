@@ -5,7 +5,7 @@
 // and write the results back to the ledger.
 import type Database from "better-sqlite3";
 import type { Claim, SessionContext } from "./db.js";
-import { claimsForDate, openClaims, saveVerification } from "./db.js";
+import { claimsForDate, saveVerification } from "./db.js";
 import { CLAIM_LIMITS, recordClaims } from "./claims.js";
 import { attributeTokens, SIBLING_CONCEPTS, sameAttribute } from "./concepts.js";
 import { localDateInTz } from "./dates.js";
@@ -673,8 +673,12 @@ export async function recheck(args: {
 }): Promise<RecheckReport> {
   const { ctx, intent, now, llm, instructions, search, maxSearches } = args;
 
-  const dated = claimsForDate(ctx.db, ctx.sessionId, intent.date);
-  const claims = dated.length > 0 ? dated : openClaims(ctx.db, ctx.sessionId);
+  // Only facts observed on the named date can answer "is that still true".
+  // Falling back to today's open beliefs re-checked the wrong subject when the
+  // user's premise was wrong ("last Tuesday I asked about Postgres" with only
+  // a Node.js fact in the ledger), so the caller decides whether to take this
+  // path at all; here an empty date means there is nothing to compare.
+  const claims = claimsForDate(ctx.db, ctx.sessionId, intent.date);
   const attributeQueries = buildQueries(claims);
   const changeQueries = buildChangeQueries(claims, intent.date);
 
