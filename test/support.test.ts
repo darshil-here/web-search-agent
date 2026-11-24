@@ -445,6 +445,64 @@ test("the absence guard does not rewrite an already marked cell", () => {
   assert.doesNotMatch(twice.answer, /sourceshttps/);
 });
 
+// --- live prices ------------------------------------------------------------
+//
+// The live failure: the model answered "$59,979 USD" from a Yahoo Finance
+// quote whose price line reads "Regular market price: 59,979.21". The guard
+// compared the strings literally, found "$59,979" nowhere (the page has no
+// dollar sign on that line and publishes cents), and rewrote a correct answer
+// as "Bitcoin is not stated in sources".
+const LIVE_PRICE = [
+  {
+    url: "https://finance.test/quote/BTC-USD",
+    text: "CCC • USD\n\nRegular market price: 59,979.21 -1,623.04 (-2.63%) as of 2026-11-24 17:38 UTC\n\nMarket state: REGULAR",
+  },
+];
+
+test("a rounded price is supported when the page publishes cents", () => {
+  const answer =
+    "Bitcoin is $59,979 USD as of Nov 24, 2026 17:38 UTC [https://finance.test/quote/BTC-USD].";
+
+  assert.deepEqual(guardValueSupport(answer, LIVE_PRICE).replaced, []);
+});
+
+test("the dollar sign is display, not evidence", () => {
+  // The page writes the price without "$"; the answer adds it. Same value.
+  const answer =
+    "Bitcoin is $59,979.21 USD [https://finance.test/quote/BTC-USD].";
+
+  assert.deepEqual(guardValueSupport(answer, LIVE_PRICE).replaced, []);
+});
+
+test("a price framed by a prose word keeps its value", () => {
+  // "today" and "right now" say when the price was read, not what it measures.
+  const answer =
+    "Bitcoin is $59,979 today and 59,979.21 right now [https://finance.test/quote/BTC-USD].";
+
+  assert.deepEqual(guardValueSupport(answer, LIVE_PRICE).replaced, []);
+});
+
+test("rounding is not a licence to change the value", () => {
+  // 59,979.21 rounds to 59,979, not 59,980.
+  const answer = "Bitcoin is $59,980 USD [https://finance.test/quote/BTC-USD].";
+
+  assert.deepEqual(guardValueSupport(answer, LIVE_PRICE).replaced, ["$59,980 USD"]);
+});
+
+test("the answer may not add precision the page does not state", () => {
+  const answer = "Bitcoin is $59,979.213 USD [https://finance.test/quote/BTC-USD].";
+
+  assert.deepEqual(guardValueSupport(answer, LIVE_PRICE).replaced, [
+    "$59,979.213 USD",
+  ]);
+});
+
+test("a number the page never states is still replaced", () => {
+  const answer = "Bitcoin is $60,000 USD [https://finance.test/quote/BTC-USD].";
+
+  assert.deepEqual(guardValueSupport(answer, LIVE_PRICE).replaced, ["$60,000 USD"]);
+});
+
 test("two vendor cells on one table row are not graded against one pooled corpus", () => {
   const sources = [
     { url: "https://neon.test/pricing", text: "Free: up to 100 projects." },

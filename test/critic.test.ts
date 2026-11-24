@@ -210,6 +210,45 @@ test("ground marks a numeric claim whose value no source states", async () => {
   assert.equal(result.replaced.length, 1);
 });
 
+test("a live price survives the critic when the page writes it with cents", async () => {
+  // The live run: the critic grounded "$59,979 USD" with a Yahoo Finance quote
+  // whose price line is "Regular market price: 59,979.21". Code rewrote the
+  // correct value as "not stated in sources" because it compared the digits
+  // literally. A rounded price the page states must survive.
+  const price: EnrichedSource[] = [
+    {
+      title: "Bitcoin BTC (BTC-USD) Live Price, News, Chart & Price History",
+      url: "https://finance.test/quote/BTC-USD",
+      content:
+        "CCC • USD\n\nRegular market price: 59,979.21 -1,623.04 (-2.63%) as of 2026-11-24 17:38 UTC\n\nMarket state: REGULAR",
+      pageText: null,
+      publishedAt: "2026-11-24",
+    },
+  ];
+  const result = await ground(
+    llmReturning({
+      revisedAnswer:
+        "Bitcoin is $59,979 USD (Yahoo Finance quote, timestamped Nov 24, 2026 at 17:38 UTC). [https://finance.test/quote/BTC-USD]",
+      statements: [
+        {
+          text: "Bitcoin is $59,979 USD",
+          url: "https://finance.test/quote/BTC-USD",
+          quote:
+            "Regular market price: 59,979.21 -1,623.04 (-2.63%) as of 2026-11-24 17:38 UTC",
+          supported: true,
+        },
+      ],
+    }),
+    "Bitcoin is $59,979 USD (Yahoo Finance quote, timestamped Nov 24, 2026 at 17:38 UTC).",
+    price,
+    "What is the bitcoin price today? in usd"
+  );
+
+  assert.doesNotMatch(result.answer, /not stated in sources/);
+  assert.match(result.answer, /\$59,979 USD/);
+  assert.deepEqual(result.replaced, []);
+});
+
 test("ground keeps a value supported by a verbatim quote naming its feature", async () => {
   const quoted: EnrichedSource[] = [
     {

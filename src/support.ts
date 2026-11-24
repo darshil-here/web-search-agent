@@ -45,6 +45,12 @@ const STOP = new Set([
   "of", "per", "the", "a", "an", "and", "or", "to", "for", "in", "on", "with",
   "by", "from", "is", "are", "as", "at", "each", "that", "this",
   "free", "pro", "team", "enterprise",
+  // Time and stance words that follow a value in prose ("$59,979 today",
+  // "59,979 right now"). They frame when a figure was observed; they are not
+  // the feature being measured, and requiring them in the source marked a
+  // price the page states as unknown.
+  "today", "tonight", "now", "right", "currently", "approximately", "roughly",
+  "exactly", "nearly", "almost", "recently",
 ]);
 
 // Size units carry no identity: "1 GB" of storage and "1 GB" of egress are
@@ -160,6 +166,37 @@ function localFeatureTokens(
   return rowLabel ? featureTokens(rowLabel).slice(0, 2) : [];
 }
 
+// A measure whose value is the whole needle: an optional currency symbol, a
+// number with thousands separators, and an optional fraction. Anything else
+// ("$25/seat", "5 GB") needs the substring path because its unit is part of the
+// claim.
+const PURE_NUMBER = /^[$€£]?\d[\d,]*(?:\.\d+)?$/;
+// Every number on a page, with a currency symbol when one is attached.
+const NUMBER_TOKEN = /[$€£]?\d[\d,]*(?:\.\d+)?/g;
+
+function numericValue(text: string): number | null {
+  const cleaned = text.replace(/[$€£\s]/g, "").replace(/,/g, "");
+  if (!/^\d+(?:\.\d+)?$/.test(cleaned)) return null;
+  const value = Number(cleaned);
+  return Number.isFinite(value) ? value : null;
+}
+
+/**
+ * A source states the claim's value when the source number rounds to it at the
+ * precision the answer used. Price pages publish cents ("59,979.21") and the
+ * answer rounds them ("$59,979"); requiring the literal digits marked a value
+ * the page plainly states as unknown. The claim may not add precision: an
+ * answer with two decimals needs a source with two decimals.
+ */
+function statesValue(claim: string, stated: string): boolean {
+  const target = numericValue(claim);
+  const value = numericValue(stated);
+  if (target === null || value === null) return false;
+  const fraction = claim.replace(/[$€£,\s]/g, "").split(".")[1] ?? "";
+  const factor = 10 ** fraction.length;
+  return Math.abs(Math.round(value * factor) / factor - target) < 1e-9;
+}
+
 /** True when a number at [at, at+len) is not part of a larger number. */
 function standaloneNumber(hay: string, at: number, len: number): boolean {
   const digit = (ch: string | undefined) => ch !== undefined && /\d/.test(ch);
@@ -273,20 +310,51 @@ function windowSupports(
 
   const found = (hay: string, needle: string): boolean => {
     if (needle === "") return false;
-    const numeric = /^\$?\d/.test(needle);
+    // Compare plain numbers by value, not by spelling. A page may write
+    // "59,979.21" where the answer writes "$59,979", and the dollar sign is a
+    // display choice on the page, not a measurement the answer has to repeat.
+    if (PURE_NUMBER.test(needle)) {
+      for (const token of hay.matchAll(NUMBER_TOKEN)) {
+        const at = token.index ?? 0;
+        if (!statesValue(needle, token[0])) continue;
+        // A number must not match inside a larger one: "1" is not evidence for
+        // a source that only says "100".
+        if (!standaloneNumber(hay, at, token[0].length)) continue;
+        const window = hay.slice(
+          Math.max(0, at - 60),
+          at + token[0].length + 100
+        );
+        const matches = (word: string) => sameWord(window, word);
+        if (
+          context.any
+            ? context.tokens.some(matches)
+            : context.tokens.every(matches)
+        ) {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    // A needle with a unit ("25/seat", "5 gb") still starts with a number, so
+    // the number must not sit inside a larger one: "5 gb" is not evidence for
+    // a source that says "15 gb".
+    const prefix = needle.match(/^[$€£]?\d[\d,]*(?:\.\d+)?/)?.[0] ?? "";
     let at = 0;
     for (;;) {
       const hit = findNeedle(hay, needle, at);
       if (!hit) break;
-      // A number must not match inside a larger one: "1" is not evidence for a
-      // source that only says "100".
-      if (!numeric || standaloneNumber(hay, hit.index, hit.length)) {
+      if (prefix === "" || standaloneNumber(hay, hit.index, prefix.length)) {
         const window = hay.slice(
           Math.max(0, hit.index - 60),
           hit.index + hit.length + 100
         );
-        const matches = (token: string) => sameWord(window, token);
-        if (context.any ? context.tokens.some(matches) : context.tokens.every(matches)) {
+        const matches = (word: string) => sameWord(window, word);
+        if (
+          context.any
+            ? context.tokens.some(matches)
+            : context.tokens.every(matches)
+        ) {
           return true;
         }
       }
