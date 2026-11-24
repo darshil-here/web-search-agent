@@ -504,7 +504,7 @@ async function turn(
       const urls = selectUrls(rankedSources, 2, config.maxPageFetches);
       status(
         "grounding",
-        `Grounding: fetching ${plural(urls.length, "source page")} to check the numbers`
+        `Grounding: fetching ${plural(urls.length, "source page")} to verify the claims`
       );
       const pages = await fetchPages(urls);
       const enriched: EnrichedSource[] = rankedSources.map((source) => {
@@ -535,16 +535,16 @@ async function turn(
           `Grounding check failed: ${grounded.error}; using the original answer`,
           "warn"
         );
-      } else if (grounded.replaced.length > 0) {
+      } else if (grounded.droppedClaims.length > 0) {
         status(
           "grounding",
-          `Grounding: replaced ${plural(
-            grounded.replaced.length,
-            "unsupported value"
-          )} with "not stated in sources"`
+          `Grounding: dropped ${plural(
+            grounded.droppedClaims.length,
+            "unverified claim"
+          )}`
         );
       } else {
-        status("grounding", "Grounding: every value is supported by a source");
+        status("grounding", "Grounding: every claim is supported by a quote");
       }
       answer = grounded.answer;
     }

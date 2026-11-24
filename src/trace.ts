@@ -86,7 +86,8 @@ type Final = {
 export type CriticTrace = {
   statements: number;
   dropped: number;
-  replaced: string[];
+  /** The sentences or table cells removed because they did not verify. */
+  droppedClaims: string[];
   note: string | null;
   /** Snippet + fetched page for each source the guard graded against. */
   sources?: Array<{ url: string; text: string }>;
@@ -356,7 +357,7 @@ export class Tracer {
       `answer_kind: ${this.finalInfo?.answerKind ?? "n/a"}`,
       `critic_statements: ${this.criticInfo?.statements ?? 0}`,
       `critic_dropped: ${this.criticInfo?.dropped ?? 0}`,
-      `critic_replaced: ${this.criticInfo?.replaced.length ?? 0}`,
+      `critic_dropped_claims: ${this.criticInfo?.droppedClaims.length ?? 0}`,
       `scope_removed: ${this.scopeInfo?.removed.length ?? 0}`,
       `calibration_rewrites: ${this.calibrationInfo?.rewritten.length ?? 0}`,
       "tokens:",
@@ -449,15 +450,15 @@ export class Tracer {
         "",
         "## Grounding critic",
         "",
-        "| statements | dropped | replaced | note |",
-        "|----------:|--------:|---------:|------|",
-        `| ${c.statements} | ${c.dropped} | ${c.replaced.length} | ${tableCell(c.note ?? "—")} |`,
+        "| statements | unverified | removed | note |",
+        "|----------:|-----------:|--------:|------|",
+        `| ${c.statements} | ${c.dropped} | ${c.droppedClaims.length} | ${tableCell(c.note ?? "—")} |`,
         ""
       );
-      for (const value of c.replaced) {
-        lines.push(`- replaced: ${tableCell(value)}`);
+      for (const value of c.droppedClaims) {
+        lines.push(`- dropped: ${tableCell(value)}`);
       }
-      if (c.replaced.length > 0) lines.push("");
+      if (c.droppedClaims.length > 0) lines.push("");
       if (c.error) lines.push(`**Critic error:** ${c.error}`, "");
     }
 

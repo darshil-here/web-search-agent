@@ -58,7 +58,7 @@ test("critic and scope phases render in the trace", () => {
       answer: "revised",
       statements: 3,
       dropped: 1,
-      replaced: ["10 branches"],
+      droppedClaims: ["10 branches"],
       note: "No publication date was visible in the retrieved sources.",
       usage: { prompt: 1, completion: 1, total: 2 },
     };
@@ -76,7 +76,7 @@ test("critic and scope phases render in the trace", () => {
     assert.match(text, /## Grounding critic/);
     assert.match(text, /## Scope/);
     assert.match(text, /critic_statements: 3/);
-    assert.match(text, /critic_replaced: 1/);
+    assert.match(text, /critic_dropped_claims: 1/);
     assert.match(text, /10 branches/);
     assert.match(text, /scope_removed: 1/);
   } finally {

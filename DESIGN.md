@@ -41,9 +41,14 @@ for the ledger, and the next turn still sees the fact.
 
 The normal loop gives the model exactly one tool, `web_search`, and five steps.
 Code ranks sources by freshness before the model sees them. If an answer has a
-table or three or more numbers, a grounding pass fetches the cited pages and
-checks each value against the text beside its citation. Anything the page does
-not state becomes "not stated in sources".
+table, a citation, or any real number, a grounding pass fetches the cited pages.
+The model rewrites the answer so each claim carries an inline URL and a verbatim
+quote from that page; code verifies only two things: the quote is contiguous in
+the cited text, and the claim's numbers appear in that quote. A claim that fails
+is removed whole (a table cell becomes "Not stated"), never spliced with an
+error string. Feature attribution — is this number about the same thing as the
+sentence — is left to the model, because encoding it in code produced false
+negatives on live prices.
 
 The re-check path is deliberately not an agent. It pulls the claims recorded on
 the named date, searches each subject twice (the recorded attribute, then
@@ -65,8 +70,8 @@ decides what to search. It does not decide whether to think, how much memory to
 load, or whether a value is supported.
 
 The same reason put the guards in functions instead of the system prompt.
-`support.ts` grades each numeric claim against the cited page. `unverified.ts`
-rewrites a sentence that presents an unverified value as current.
+`support.ts` checks a claim's verbatim quote and numeric presence.
+`unverified.ts` rewrites a sentence that presents an unverified value as current.
 `calibration.ts` hedges absolute claims no source supports. `scope.ts` removes
 sentences about concepts the user did not ask about. Prompts drift. Functions
 have tests.
