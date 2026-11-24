@@ -25,7 +25,7 @@ changed since then" stops being a prompt trick and becomes a query.
 
 ## The turn pipeline
 
-Every turn is the same four stages, in code, in `agent.ts`.
+Every turn is the same four stages, orchestrated by `agent.ts`.
 
 1. Recall. Build a notebook from SQLite: the turns for a date you named, or the
    last few, plus current claims. Cap it at 4 KB and say when turns were
@@ -34,6 +34,10 @@ Every turn is the same four stages, in code, in `agent.ts`.
    No classifier call, no extra latency.
 3. Answer. Either the normal loop or the re-check path.
 4. Remember. Extract claims from sourced answers, best effort, never fatal.
+
+The guarded answer is emitted as soon as it is ready. Claim extraction runs
+after it and finishes before `done`, so the reader sees the text without waiting
+for the ledger, and the next turn still sees the fact.
 
 The normal loop gives the model exactly one tool, `web_search`, and five steps.
 Code ranks sources by freshness before the model sees them. If an answer has a
@@ -112,10 +116,10 @@ not.
 Re-check detection is regex, so it catches the phrasings I tested and misses
 others. Entity resolution is string matching, so "Postgres hosting" and
 "Postgres" can become different subjects. The live judge is noisy: the same code
-has scored between 8/12 and 11/12 across sweeps, depending on what Tavily
-returned that day. Cold start is honest but unhelpful. If you name a date before
-the conversation has facts, the agent can only ask for the context it is
-missing.
+has ranged 8–11/12 across sweeps, depending on what Tavily returned that day, so
+it is a sanity check rather than a score. Cold start is honest but unhelpful. If
+you name a date before the conversation has facts, the agent can only ask for the
+context it is missing.
 
 ## Another week
 
