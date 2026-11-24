@@ -6,7 +6,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { format } from "node:util";
 import type { LlmCall, StopReason, ToolCall } from "./llm.js";
-import { flatten, pad2 } from "./text.js";
+import { clip, flatten, pad2 } from "./text.js";
 
 export type ClaimEvent = {
   extracted: number;
@@ -88,6 +88,13 @@ export type CriticTrace = {
   dropped: number;
   /** The sentences or table cells removed because they did not verify. */
   droppedClaims: string[];
+  /** Every statement, its quote and its verdict, for post-mortems. */
+  checked: Array<{
+    text: string;
+    url: string | null;
+    quote: string | null;
+    supported: boolean;
+  }>;
   note: string | null;
   /** Snippet + fetched page for each source the guard graded against. */
   sources?: Array<{ url: string; text: string }>;
@@ -459,6 +466,23 @@ export class Tracer {
         lines.push(`- dropped: ${tableCell(value)}`);
       }
       if (c.droppedClaims.length > 0) lines.push("");
+      if (c.checked.length > 0) {
+        lines.push(
+          "### Statements",
+          "",
+          "| # | statement | source | quote | verified |",
+          "|--:|---|---|---|:--------:|"
+        );
+        c.checked.forEach((statement, index) => {
+          lines.push(
+            `| ${index + 1} | ${tableCell(clip(statement.text, 160))} | ` +
+              `${tableCell(statement.url ?? "—")} | ` +
+              `${tableCell(clip(statement.quote ?? "—", 160))} | ` +
+              `${statement.supported ? "yes" : "no"} |`
+          );
+        });
+        lines.push("");
+      }
       if (c.error) lines.push(`**Critic error:** ${c.error}`, "");
     }
 

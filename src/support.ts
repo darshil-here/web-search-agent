@@ -136,6 +136,7 @@ export function checkClaim(
 export type VerifiedStatement = {
   text: string;
   url: string | null;
+  quote: string | null;
   supported: boolean;
 };
 
@@ -169,9 +170,9 @@ function isSeparator(line: string): boolean {
 }
 
 /**
- * Remove the claims that did not verify. Prose is handled sentence by sentence;
- * a table cell becomes "Not stated". Nothing is spliced inside a sentence, so a
- * wrong value is never left behind with an error string around it.
+ * Remove the claims that did not verify. This path is used for answers with a
+ * markdown table, where the table itself delimits the claims. Prose answers do
+ * not use it: they are assembled from verified statements instead.
  */
 export function applyEvidence(
   answer: string,
@@ -237,4 +238,59 @@ export function applyEvidence(
     answer: kept.join("\n").replace(/\n{3,}/g, "\n\n").trim(),
     dropped,
   };
+}
+
+/** A markdown line that must stand on its own, not be merged into a paragraph. */
+function isBlockLine(text: string): boolean {
+  return (
+    /^\s*(?:[-*•]|\d+[.)])\s+/.test(text) ||
+    /^\s*#{1,6}\s+/.test(text) ||
+    /^\s*>\s?/.test(text)
+  );
+}
+
+function isBullet(text: string): boolean {
+  return /^\s*(?:[-*•]|\d+[.)])\s+/.test(text);
+}
+
+/**
+ * Assemble a prose answer from the critic's statements, in reading order. The
+ * statements are the answer: there is no draft to split into sentences and no
+ * text to match back. A statement the verifier rejected is simply absent.
+ * Consecutive sentences form a paragraph; bullets and headings stay on their
+ * own lines. This removes the paraphrase and abbreviation failures that lost
+ * verified answers.
+ */
+export function assembleProse(statements: VerifiedStatement[]): string {
+  const kept = statements
+    .filter((statement) => statement.supported)
+    .map((statement) => statement.text.trim())
+    .filter((text) => text !== "");
+
+  const parts: Array<{ text: string; bullet: boolean }> = [];
+  let paragraph: string[] = [];
+  const flush = () => {
+    if (paragraph.length > 0) {
+      parts.push({ text: paragraph.join(" "), bullet: false });
+      paragraph = [];
+    }
+  };
+  for (const text of kept) {
+    if (isBlockLine(text)) {
+      flush();
+      parts.push({ text, bullet: isBullet(text) });
+    } else {
+      paragraph.push(text);
+    }
+  }
+  flush();
+
+  let out = "";
+  let previousBullet = false;
+  for (const part of parts) {
+    if (out !== "") out += part.bullet && previousBullet ? "\n" : "\n\n";
+    out += part.text;
+    previousBullet = part.bullet;
+  }
+  return out;
 }

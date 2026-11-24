@@ -6,11 +6,23 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   applyEvidence,
+  assembleProse,
   checkClaim,
   claimMeasures,
   isVerbatimQuote,
   quoteStatesClaim,
+  type VerifiedStatement,
 } from "../src/support.js";
+
+const statement = (
+  text: string,
+  supported = true
+): VerifiedStatement => ({
+  text,
+  url: supported ? "https://example.test" : null,
+  quote: null,
+  supported,
+});
 
 const YAHOO =
   "CCC • USD\n\nRegular market price: 59,979.21 -1,623.04 (-2.63%) as of 2026-11-24 17:38 UTC\n\nMarket state: REGULAR";
@@ -106,8 +118,8 @@ test("an unverified sentence is removed whole, not spliced", () => {
   const answer =
     "Neon has 10 branches [https://neon.test/pricing]. Its free tier includes 1 GB of storage [https://neon.test/pricing]. Prices move continuously.";
   const result = applyEvidence(answer, [
-    { text: "Neon has 10 branches", url: "https://neon.test/pricing", supported: false },
-    { text: "Its free tier includes 1 GB of storage", url: "https://neon.test/pricing", supported: true },
+    { text: "Neon has 10 branches", url: "https://neon.test/pricing", quote: null, supported: false },
+    { text: "Its free tier includes 1 GB of storage", url: "https://neon.test/pricing", quote: null, supported: true },
   ]);
 
   assert.doesNotMatch(result.answer, /10 branches/);
@@ -133,8 +145,8 @@ test("an unsupported table cell becomes Not stated and its neighbours survive", 
   const answer =
     "| Feature | Neon |\n|---|---|\n| Branching | 10 branches [https://neon.test/pricing] |\n| Storage | 1 GB [https://neon.test/pricing] |";
   const result = applyEvidence(answer, [
-    { text: "10 branches", url: "https://neon.test/pricing", supported: false },
-    { text: "1 GB", url: "https://neon.test/pricing", supported: true },
+    { text: "10 branches", url: "https://neon.test/pricing", quote: null, supported: false },
+    { text: "1 GB", url: "https://neon.test/pricing", quote: null, supported: true },
   ]);
 
   assert.match(result.answer, /\| Branching \| Not stated/);
@@ -153,7 +165,7 @@ test("a table cell with a number and no statement is Not stated", () => {
 test("a table header with a number is not rewritten", () => {
   const answer = "| Plan | 2026 quota |\n|---|---|\n| Free | 1 GB |";
   const result = applyEvidence(answer, [
-    { text: "1 GB", url: "https://neon.test/pricing", supported: true },
+    { text: "1 GB", url: "https://neon.test/pricing", quote: null, supported: true },
   ]);
 
   assert.match(result.answer, /\| Plan \| 2026 quota \|/);
@@ -164,8 +176,8 @@ test("the first table column is a row label, never Not stated", () => {
   const answer =
     "| Platform | Bandwidth |\n|---|---|\n| Netlify | 100 GB |\n| Vercel | 5 GB |";
   const result = applyEvidence(answer, [
-    { text: "Netlify 100 GB", url: "https://netlify.test/pricing", supported: true },
-    { text: "Vercel 200 GB", url: "https://vercel.test/pricing", supported: false },
+    { text: "Netlify 100 GB", url: "https://netlify.test/pricing", quote: null, supported: true },
+    { text: "Vercel 200 GB", url: "https://vercel.test/pricing", quote: null, supported: false },
   ]);
 
   assert.match(result.answer, /\| Netlify \| 100 GB \|/);
@@ -176,7 +188,7 @@ test("the first table column is a row label, never Not stated", () => {
 test("a cell's bracketed citation does not hide the claim", () => {
   const answer = "| Platform | Bandwidth |\n|---|---|\n| Netlify | 100 GB [https://netlify.test/pricing] |";
   const result = applyEvidence(answer, [
-    { text: "Netlify 100 GB", url: "https://netlify.test/pricing", supported: true },
+    { text: "Netlify 100 GB", url: "https://netlify.test/pricing", quote: null, supported: true },
   ]);
 
   assert.match(result.answer, /\| Netlify \| 100 GB \[https:\/\/netlify\.test\/pricing\] \|/);
@@ -211,4 +223,40 @@ test("a raw total does not verify a claim that adds precision", () => {
 test("million and billion scale the same way", () => {
   assert.equal(quoteStatesClaim("1.2 million users", "1,200,000 users"), true);
   assert.equal(quoteStatesClaim("$459 billion", "459,000,000,000"), true);
+});
+
+// --- prose assembly ---------------------------------------------------------
+
+test("verified statements are the prose, in order", () => {
+  const answer = assembleProse([
+    statement("Coinbase lists $60,300.83."),
+    statement("A claim that failed.", false),
+    statement("Yahoo Finance lists $60,051.88."),
+  ]);
+  assert.equal(
+    answer,
+    "Coinbase lists $60,300.83. Yahoo Finance lists $60,051.88."
+  );
+});
+
+test("assembly never splits a sentence at an abbreviation", () => {
+  const sentence =
+    "Python 3.15.2 is a stable release dated Oct. 25, 2026.";
+  assert.equal(assembleProse([statement(sentence)]), sentence);
+});
+
+test("bullets stay on separate lines", () => {
+  const answer = assembleProse([
+    statement("- **Node.js LTS:** v26.13.1."),
+    statement("- **Python stable:** 3.15.2."),
+  ]);
+  assert.equal(answer, "- **Node.js LTS:** v26.13.1.\n- **Python stable:** 3.15.2.");
+});
+
+test("a paragraph broken into sentences is joined with spaces", () => {
+  const answer = assembleProse([
+    statement("The price rose."),
+    statement("Volume fell."),
+  ]);
+  assert.equal(answer, "The price rose. Volume fell.");
 });

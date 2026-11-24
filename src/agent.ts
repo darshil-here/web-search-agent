@@ -28,6 +28,7 @@ import {
 import { createFetch, selectUrls } from "./pages.js";
 import { extractSourceDate, relativeDateMention } from "./source-date.js";
 import { ground, needsGrounding } from "./critic.js";
+import { sourcesSection, stripCitations, urlsIn } from "./sources.js";
 import { guardScope } from "./scope.js";
 import { guardCalibration } from "./calibration.js";
 import { expandInlineTables } from "./markdown.js";
@@ -493,6 +494,11 @@ async function turn(
           ? "\n\nNo publication date was visible on the cited page; treat the details as current as of this conversation."
           : "\n\nNo publication date was visible in the retrieved sources.";
       }
+
+      // This path skipped the critic, not the citation cleanup: no raw URL may
+      // reach the bubble, and a URL already in the prose becomes a Source.
+      const citedUrls = urlsIn(answer);
+      answer = stripCitations(answer) + sourcesSection(citedUrls, rankedSources);
     }
 
     if (

@@ -118,7 +118,7 @@ test("only cited, retrieved pages appear, once each", () => {
 
   assert.equal(
     section,
-    "\n\n## Sources\n\n- [Coinbase](https://www.coinbase.com/price/bitcoin)\n- [Yahoo Finance](https://finance.yahoo.com/quote/BTC-USD)"
+    "\n\n**Sources:** [Coinbase](https://www.coinbase.com/price/bitcoin) · [Yahoo Finance](https://finance.yahoo.com/quote/BTC-USD)"
   );
 });
 

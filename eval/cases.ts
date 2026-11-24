@@ -384,9 +384,9 @@ export const CASES: EvalCase[] = [
       const guarded = applyEvidence(
         "| Feature | Neon |\n|---|---|\n| Branching | 10 branches [https://neon.com/pricing] |",
         [
-          { text: "10 branches", url: "https://neon.com/pricing", supported: false },
-          { text: "Feature", url: null, supported: true },
-          { text: "Neon", url: null, supported: true },
+          { text: "10 branches", url: "https://neon.com/pricing", quote: null, supported: false },
+          { text: "Feature", url: null, quote: null, supported: true },
+          { text: "Neon", url: null, quote: null, supported: true },
         ]
       );
 
@@ -405,6 +405,7 @@ export const CASES: EvalCase[] = [
           {
             text: "Supabase includes 2 active projects",
             url: "https://supabase.com/pricing",
+            quote: "Free: 2 active projects per user.",
             supported: checkClaim(
               "Supabase includes 2 active projects",
               "Free: 2 active projects per user.",

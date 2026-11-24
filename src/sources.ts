@@ -120,14 +120,16 @@ export function sourcesSection(
   for (const source of sources) byPage.set(canonicalUrl(source.url), source);
 
   const seen = new Set<string>();
-  const lines: string[] = [];
+  const links: string[] = [];
   for (const url of cited) {
     const key = canonicalUrl(url);
     if (seen.has(key)) continue;
     const source = byPage.get(key);
     if (source === undefined) continue;
     seen.add(key);
-    lines.push(`- [${sourceLabel(source.title, source.url)}](${source.url})`);
+    links.push(`[${sourceLabel(source.title, source.url)}](${source.url})`);
   }
-  return lines.length > 0 ? `\n\n## Sources\n\n${lines.join("\n")}` : "";
+  // One compact line reads better inside a chat bubble than a heading and a
+  // list, and the renderer already styles **bold** and [links](url).
+  return links.length > 0 ? `\n\n**Sources:** ${links.join(" · ")}` : "";
 }

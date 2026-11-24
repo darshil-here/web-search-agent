@@ -512,9 +512,9 @@ test("a changed value without a URL gets the sourced diff line appended", async 
   });
 
   assert.match(report.answer, /changed to \$9/);
-  assert.match(report.answer, /## Sources/);
+  assert.match(report.answer, /\*\*Sources:\*\*/);
   assert.match(report.answer, /\[Alpha\]\(https:\/\/alpha\.test\/pricing\)/);
-  const [prose] = report.answer.split("## Sources");
+  const [prose] = report.answer.split("**Sources:**");
   assert.doesNotMatch(prose, /\(https:\/\/alpha\.test\/pricing\)/);
   db.close();
 });

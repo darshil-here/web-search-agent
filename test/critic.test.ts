@@ -358,12 +358,12 @@ test("citations move to a Sources list with a human label", async () => {
   );
 
   assert.doesNotMatch(result.answer, /\[https?:\/\//);
-  const [prose] = result.answer.split("## Sources");
+  const [prose] = result.answer.split("**Sources:**");
   assert.doesNotMatch(prose, /https?:\/\//, "raw URL leaked into prose");
-  assert.match(result.answer, /## Sources/);
+  assert.match(result.answer, /\*\*Sources:\*\*/);
   assert.match(
     result.answer,
-    /- \[Yahoo Finance\]\(https:\/\/finance\.test\/quote\/BTC-USD\)/
+    /\[Yahoo Finance\]\(https:\/\/finance\.test\/quote\/BTC-USD\)/
   );
   assert.equal(result.answer.match(/finance\.test/g)?.length, 1, result.answer);
   assert.doesNotMatch(result.answer, /unused\.test/);
@@ -411,8 +411,8 @@ test("a table cell keeps its value and the row keeps its name", async () => {
   assert.doesNotMatch(result.answer, /\[https?:\/\//);
   assert.match(result.answer, /\| Netlify \| 100 GB \|/);
   assert.match(result.answer, /\| Vercel \| 200 GB \|/);
-  assert.match(result.answer, /- \[Netlify Pricing\]/);
-  assert.match(result.answer, /- \[Vercel Pricing\]/);
+  assert.match(result.answer, /\[Netlify Pricing\]/);
+  assert.match(result.answer, /\[Vercel Pricing\]/);
 });
 
 test("an unverified value does not erase the platform name", async () => {
@@ -514,6 +514,94 @@ test("canonicalising a cleaned URL does not append its fragment twice", async ()
   );
 
   assert.equal(result.answer.match(/#compare-plans/g)?.length, 1, result.answer);
+});
+
+test("a prose answer is assembled from statements, not matched back", async () => {
+  const nodeQuote = "| 26 (LTS) | 6 months ago (05 May 2026) | ... | 26.13.1 (11 Nov 2026) |";
+  const pythonQuote = "Python 3.15.2 - Oct. 25, 2026";
+  const result = await ground(
+    llmReturning({
+      // A paraphrase that the old sentence matcher could not line up with the
+      // statements. It must not matter: the statements are the answer.
+      revisedAnswer:
+        "- **Node.js LTS:** Node 26.13.1 is the newest LTS, dated 11 Nov 2026.\n- **Python stable:** Python 3.15.2 came out on Oct. 25, 2026.",
+      statements: [
+        {
+          text: "- **Node.js LTS:** The releases table lists **v26.13.1** as the latest release for the LTS v26 line, dated **11 Nov 2026**.",
+          url: "https://endoflife.test/nodejs",
+          quote: nodeQuote,
+        },
+        {
+          text: "- **Python stable:** Python.org identifies **Python 3.15.2** as the latest Python 3 release, dated **Oct. 25, 2026**.",
+          url: "https://python.test/downloads",
+          quote: pythonQuote,
+        },
+      ],
+    }),
+    "Node.js 26.13.1 is the latest LTS. Python 3.15.2 is the latest stable release.",
+    [
+      {
+        title: "Node.js | endoflife.date",
+        url: "https://endoflife.test/nodejs",
+        content: nodeQuote,
+        pageText: null,
+        publishedAt: null,
+      },
+      {
+        title: "Python Releases for Windows | Python.org",
+        url: "https://python.test/downloads",
+        content: pythonQuote,
+        pageText: null,
+        publishedAt: null,
+      },
+    ],
+    "What are the latest stable release versions of Node.js LTS and Python?"
+  );
+
+  assert.doesNotMatch(result.answer, /could not verify/i);
+  assert.match(result.answer, /v26\.13\.1/);
+  assert.match(result.answer, /11 Nov 2026/);
+  assert.match(result.answer, /Python 3\.15\.2/);
+  assert.match(result.answer, /Oct\. 25, 2026/);
+  assert.deepEqual(result.droppedClaims, []);
+  assert.equal(result.checked.length, 2);
+  assert.deepEqual(
+    result.checked.map((item) => item.supported),
+    [true, true]
+  );
+});
+
+test("the trace records each statement, its quote and its verdict", async () => {
+  const result = await ground(
+    llmReturning({
+      revisedAnswer: "Costs $10 [https://n.test].",
+      statements: [
+        {
+          text: "Costs $10",
+          url: "https://n.test",
+          quote: "Neon offers 10 GB of storage.",
+        },
+        {
+          text: "Costs $99",
+          url: "https://n.test",
+          quote: "Neon offers 10 GB of storage.",
+        },
+      ],
+    }),
+    "Costs $10.",
+    sources,
+    "What is the price?"
+  );
+
+  assert.deepEqual(result.checked[0], {
+    text: "Costs $10",
+    url: "https://n.test",
+    quote: "Neon offers 10 GB of storage.",
+    supported: true,
+  });
+  assert.equal(result.checked[1]?.supported, false);
+  assert.match(result.answer, /Costs \$10/);
+  assert.doesNotMatch(result.answer, /\$99/);
 });
 
 test("ground keeps the original answer when the critic fails", async () => {
