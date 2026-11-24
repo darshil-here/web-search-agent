@@ -159,3 +159,56 @@ test("a table header with a number is not rewritten", () => {
   assert.match(result.answer, /\| Plan \| 2026 quota \|/);
   assert.match(result.answer, /\| Free \| 1 GB \|/);
 });
+
+test("the first table column is a row label, never Not stated", () => {
+  const answer =
+    "| Platform | Bandwidth |\n|---|---|\n| Netlify | 100 GB |\n| Vercel | 5 GB |";
+  const result = applyEvidence(answer, [
+    { text: "Netlify 100 GB", url: "https://netlify.test/pricing", supported: true },
+    { text: "Vercel 200 GB", url: "https://vercel.test/pricing", supported: false },
+  ]);
+
+  assert.match(result.answer, /\| Netlify \| 100 GB \|/);
+  assert.match(result.answer, /\| Vercel \| Not stated \|/);
+  assert.doesNotMatch(result.answer, /^\| Not stated \|/m);
+});
+
+test("a cell's bracketed citation does not hide the claim", () => {
+  const answer = "| Platform | Bandwidth |\n|---|---|\n| Netlify | 100 GB [https://netlify.test/pricing] |";
+  const result = applyEvidence(answer, [
+    { text: "Netlify 100 GB", url: "https://netlify.test/pricing", supported: true },
+  ]);
+
+  assert.match(result.answer, /\| Netlify \| 100 GB \[https:\/\/netlify\.test\/pricing\] \|/);
+});
+
+// --- magnitudes -------------------------------------------------------------
+
+test("a trillion in prose is stated by the raw total", () => {
+  assert.equal(
+    quoteStatesClaim("Apple's market cap is $5.13 trillion", "Market cap 5,133,702,791,168"),
+    true
+  );
+});
+
+test("a different magnitude is not stated by the raw total", () => {
+  assert.equal(
+    quoteStatesClaim("Apple's market cap is $5.14 trillion", "Market cap 5,133,702,791,168"),
+    false
+  );
+});
+
+test("a raw total does not verify a claim that adds precision", () => {
+  assert.equal(
+    quoteStatesClaim(
+      "Apple's market cap is $5,133,702,791,168",
+      "Market cap 5.13 trillion"
+    ),
+    false
+  );
+});
+
+test("million and billion scale the same way", () => {
+  assert.equal(quoteStatesClaim("1.2 million users", "1,200,000 users"), true);
+  assert.equal(quoteStatesClaim("$459 billion", "459,000,000,000"), true);
+});

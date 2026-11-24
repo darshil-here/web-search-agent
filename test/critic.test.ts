@@ -249,7 +249,7 @@ test("a snippet that states the value survives a fetched page that omits it", as
   assert.match(result.answer, /6 hours/);
 });
 
-test("ground appends a no-date note when no source has a date", async () => {
+test("date visibility stays in the trace, not the reply", async () => {
   const result = await ground(
     llmReturning({
       revisedAnswer: "Costs $10 [https://n.test].",
@@ -261,11 +261,12 @@ test("ground appends a no-date note when no source has a date", async () => {
     sources,
     "What is the price?"
   );
-  assert.match(result.answer, /no publication date/i);
-  assert.ok(result.note);
+  assert.doesNotMatch(result.answer, /publication date/i);
+  assert.doesNotMatch(result.answer, /visible in sources/i);
+  assert.match(result.note ?? "", /no publication date/i);
 });
 
-test("a relative update is noted instead of metadata dates", async () => {
+test("a relative update is traced, not appended to the reply", async () => {
   const result = await ground(
     llmReturning({
       revisedAnswer: "Costs $20 [https://n.test].",
@@ -286,12 +287,13 @@ test("a relative update is noted instead of metadata dates", async () => {
     "What is the price?"
   );
 
-  assert.match(result.answer, /relative update time/i);
-  assert.match(result.answer, /18 hours ago/);
-  assert.doesNotMatch(result.answer, /2023/);
+  assert.doesNotMatch(result.answer, /relative update time/i);
+  assert.doesNotMatch(result.answer, /18 hours ago/);
+  assert.match(result.note ?? "", /18 hours ago/);
+  assert.doesNotMatch(result.note ?? "", /2023/);
 });
 
-test("a date visible in the page text is still listed", async () => {
+test("a visible page date is traced, not appended to the reply", async () => {
   const result = await ground(
     llmReturning({
       revisedAnswer: "Costs $20 [https://n.test].",
@@ -312,7 +314,178 @@ test("a date visible in the page text is still listed", async () => {
     "What is the price?"
   );
 
-  assert.match(result.answer, /2026-11-04/);
+  assert.doesNotMatch(result.answer, /2026-11-04/);
+  assert.match(result.answer, /Costs \$20/);
+  assert.match(result.note ?? "", /2026-11-04/);
+});
+
+test("citations move to a Sources list with a human label", async () => {
+  const result = await ground(
+    llmReturning({
+      revisedAnswer:
+        "Bitcoin is $59,979 USD [https://finance.test/quote/BTC-USD]. Coinbase agrees [https://finance.test/quote/BTC-USD].",
+      statements: [
+        {
+          text: "Bitcoin is $59,979 USD",
+          url: "https://finance.test/quote/BTC-USD",
+          quote: PRICE_QUOTE,
+        },
+        {
+          text: "Coinbase agrees",
+          url: "https://finance.test/quote/BTC-USD",
+          quote: "Coinbase agrees",
+        },
+      ],
+    }),
+    "Bitcoin is $59,979 USD. Coinbase agrees.",
+    [
+      {
+        title: "Bitcoin BTC (BTC-USD) Live Price - Yahoo Finance",
+        url: "https://finance.test/quote/BTC-USD",
+        content: `Coinbase agrees\n${PRICE_QUOTE}`,
+        pageText: null,
+        publishedAt: null,
+      },
+      {
+        title: "An unused result",
+        url: "https://unused.test/page",
+        content: "Not cited.",
+        pageText: null,
+        publishedAt: null,
+      },
+    ],
+    "What is the bitcoin price today? in usd"
+  );
+
+  assert.doesNotMatch(result.answer, /\[https?:\/\//);
+  const [prose] = result.answer.split("## Sources");
+  assert.doesNotMatch(prose, /https?:\/\//, "raw URL leaked into prose");
+  assert.match(result.answer, /## Sources/);
+  assert.match(
+    result.answer,
+    /- \[Yahoo Finance\]\(https:\/\/finance\.test\/quote\/BTC-USD\)/
+  );
+  assert.equal(result.answer.match(/finance\.test/g)?.length, 1, result.answer);
+  assert.doesNotMatch(result.answer, /unused\.test/);
+});
+
+test("a table cell keeps its value and the row keeps its name", async () => {
+  const answer =
+    "| Platform | Bandwidth |\n|---|---|\n| Netlify | 100 GB [https://netlify.test/pricing] |\n| Vercel | 200 GB [https://vercel.test/pricing] |";
+  const result = await ground(
+    llmReturning({
+      revisedAnswer: answer,
+      statements: [
+        {
+          text: "Netlify 100 GB",
+          url: "https://netlify.test/pricing",
+          quote: "Netlify Free includes 100 GB bandwidth.",
+        },
+        {
+          text: "Vercel 200 GB",
+          url: "https://vercel.test/pricing",
+          quote: "Vercel Hobby includes 200 GB bandwidth.",
+        },
+      ],
+    }),
+    answer,
+    [
+      {
+        title: "Netlify Pricing",
+        url: "https://netlify.test/pricing",
+        content: "Netlify Free includes 100 GB bandwidth.",
+        pageText: null,
+        publishedAt: null,
+      },
+      {
+        title: "Vercel Pricing",
+        url: "https://vercel.test/pricing",
+        content: "Vercel Hobby includes 200 GB bandwidth.",
+        pageText: null,
+        publishedAt: null,
+      },
+    ],
+    "Compare the free tiers"
+  );
+
+  assert.doesNotMatch(result.answer, /\[https?:\/\//);
+  assert.match(result.answer, /\| Netlify \| 100 GB \|/);
+  assert.match(result.answer, /\| Vercel \| 200 GB \|/);
+  assert.match(result.answer, /- \[Netlify Pricing\]/);
+  assert.match(result.answer, /- \[Vercel Pricing\]/);
+});
+
+test("an unverified value does not erase the platform name", async () => {
+  const answer =
+    "| Platform | Bandwidth |\n|---|---|\n| Netlify | 100 GB |\n| Vercel | 200 GB |";
+  const result = await ground(
+    llmReturning({
+      revisedAnswer: answer,
+      statements: [
+        {
+          text: "Netlify 100 GB",
+          url: "https://netlify.test/pricing",
+          quote: "Netlify Free includes 100 GB bandwidth.",
+        },
+        {
+          text: "Vercel 200 GB",
+          url: "https://vercel.test/pricing",
+          quote: "Vercel Hobby includes 5 GB bandwidth.",
+        },
+      ],
+    }),
+    answer,
+    [
+      {
+        title: "Netlify Pricing",
+        url: "https://netlify.test/pricing",
+        content: "Netlify Free includes 100 GB bandwidth.",
+        pageText: null,
+        publishedAt: null,
+      },
+      {
+        title: "Vercel Pricing",
+        url: "https://vercel.test/pricing",
+        content: "Vercel Hobby includes 5 GB bandwidth.",
+        pageText: null,
+        publishedAt: null,
+      },
+    ],
+    "Compare the free tiers"
+  );
+
+  assert.match(result.answer, /\| Netlify \| 100 GB \|/);
+  assert.match(result.answer, /\| Vercel \| Not stated \|/);
+});
+
+test("a magnitude in prose verifies against a raw total", async () => {
+  const result = await ground(
+    llmReturning({
+      revisedAnswer:
+        "Apple's market cap is $5.13 trillion [https://finance.test/quote/AAPL].",
+      statements: [
+        {
+          text: "Apple's market cap is $5.13 trillion",
+          url: "https://finance.test/quote/AAPL",
+          quote: "Market cap 5,133,702,791,168",
+        },
+      ],
+    }),
+    "Apple's market cap is $5.13 trillion.",
+    [
+      {
+        title: "Apple Inc. (AAPL) Stock Price - Yahoo Finance",
+        url: "https://finance.test/quote/AAPL",
+        content: "Market cap 5,133,702,791,168",
+        pageText: null,
+        publishedAt: null,
+      },
+    ],
+    "What is Apple's market cap?"
+  );
+
+  assert.match(result.answer, /\$5\.13 trillion/);
+  assert.doesNotMatch(result.answer, /could not verify/i);
 });
 
 test("canonicalising a cleaned URL does not append its fragment twice", async () => {

@@ -2,11 +2,13 @@
 //
 // Post-answer grounding. The model rewrites its own answer so every factual
 // claim carries an inline URL and a verbatim quote from the cited page. Code
-// verifies the quote and the claim's numbers, then removes any claim that does
-// not hold up. The model never gets a new tool.
+// verifies the quote and the claim's numbers, removes any claim that does not
+// hold up, and lifts the surviving citations into one Sources list. The model
+// never gets a new tool.
 import type { Llm, Usage } from "./llm.js";
 import type { EnrichedSource } from "./search.js";
 import { expandInlineTables } from "./markdown.js";
+import { dropSourcesBlock, sourcesSection, stripCitations, urlsIn } from "./sources.js";
 import { extractSourceDate, relativeDateMention } from "./source-date.js";
 import {
   applyEvidence,
@@ -31,8 +33,6 @@ export type GroundResult = {
 
 const NUMBER = /\b\d+(?:\.\d+)?\b/g;
 const YEAR = /^(?:19|20)\d{2}$/;
-const URL = /https?:\/\/[^\s)\]|,]+/g;
-/** Non-global twin: `.test` on a global regex is stateful across calls. */
 const HAS_URL = /https?:\/\/[^\s)\]|,]+/;
 
 export function needsGrounding(answer: string): boolean {
@@ -55,10 +55,16 @@ You are given the original answer and the sources that were retrieved. Return:
 - revisedAnswer: the same answer with the same markdown structure, but with an
   inline source URL beside every factual claim, written as [URL]. For a table,
   put the URL in the relevant cell. Use ONLY URLs from the source list.
-  Remove every claim you cannot support with a verbatim quote. Do not replace
-  it with a marker and do not leave an unverified number behind. For a table
-  cell you cannot support, write "Not stated" in that cell. Keep connective
-  prose that makes no factual claim.
+  Citations are moved to a Sources list at the end, so do not write your own
+  Sources section. Remove every claim you cannot support with a verbatim quote.
+  Do not replace it with a marker and do not leave an unverified number behind.
+  For a table cell you cannot support, write "Not stated" in that cell. Keep
+  connective prose that makes no factual claim.
+  If the answer turns on freshness (a live price, a current role, a release
+  date), keep the source's own date or timestamp inside that sentence in one
+  short phrase; do not add a separate list of dates.
+  Prefer readable magnitudes in prose ("$5.13 trillion", "1.2 million") over
+  long digit strings; the verifier compares the value, not the spelling.
 - statements: one entry per factual claim kept in revisedAnswer.
   - text: the claim copied exactly as it appears in revisedAnswer. Include any
     date, range or qualifier that sits inside the claim, so the quote has to
@@ -107,24 +113,6 @@ type CriticData = {
   }>;
 };
 
-/** Remove a URL and its markdown wrapper, leaving no empty brackets behind. */
-function stripUrl(text: string, url: string): string {
-  const escaped = url.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return text
-    .replace(new RegExp(`\\[([^\\]]*)\\]\\(\\s*${escaped}\\s*\\)`, "g"), "$1")
-    .replace(new RegExp(`\\[\\s*${escaped}\\s*\\]`, "g"), "")
-    .split(url)
-    .join("");
-}
-
-/** Point an already-correct citation at the fetched URL without appending a
- * second fragment to it. A clean URL is a prefix of its tracked form. */
-function replaceUrl(text: string, from: string, to: string): string {
-  if (from === to) return text;
-  const escaped = from.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return text.replace(new RegExp(`${escaped}(?![\\w#?/.-])`, "g"), to);
-}
-
 export async function ground(
   llm: Llm,
   answer: string,
@@ -149,7 +137,7 @@ export async function ground(
       input: `QUESTION:\n${question}\n\nANSWER:\n${answer}\n\nSOURCES:\n${sourceBlock}`,
     });
 
-    let revised = expandInlineTables(data.revisedAnswer || answer);
+    const revised = expandInlineTables(data.revisedAnswer || answer);
     const statements = data.statements ?? [];
 
     // Evidence is the union of the search snippet and the fetched page. A page
@@ -182,12 +170,7 @@ export async function ground(
       let url = statement.url;
       if (url && !allowed.has(url)) {
         const match = retrieved.get(canonicalUrl(url));
-        if (match) {
-          revised = replaceUrl(revised, url, match);
-          url = match;
-        } else {
-          url = null;
-        }
+        url = match ?? null;
       }
       const cited = url ? byUrl.get(canonicalUrl(url)) : undefined;
       return {
@@ -201,26 +184,28 @@ export async function ground(
     });
 
     const applied = applyEvidence(revised, verified);
-    let final = applied.answer;
+    let final = dropSourcesBlock(applied.answer);
 
-    // Strip any citation that does not name a page we retrieved. The claim it
-    // sat beside is either gone above or was connective prose with no fact.
-    const cited = [...final.matchAll(new RegExp(URL.source, "g"))].map((match) => match[0]);
-    for (const url of new Set(cited)) {
-      if (allowed.has(url)) continue;
-      const match = retrieved.get(canonicalUrl(url));
-      final = match ? replaceUrl(final, url, match) : stripUrl(final, url);
-    }
+    // Citations were only ever evidence pointers. Collect the pages that
+    // survived verification, then remove the raw URLs from the prose: the
+    // reader gets clean sentences and one Sources list, never four slugs.
+    const citedUrls = urlsIn(final)
+      .map((url) => retrieved.get(canonicalUrl(url)))
+      .filter((url): url is string => url !== undefined);
+    final = stripCitations(final);
 
     // Losing every claim is a real outcome. Say so once, as its own sentence,
     // rather than splicing a marker into prose that still cites a source.
     if (final.trim() === "") {
       final = "I could not verify this answer against the retrieved sources.";
     }
+    final += sourcesSection(citedUrls, sources);
 
-    // Always state date visibility. Only dates present in the page text count
-    // as visible: Tavily's publishedAt is metadata, and listing it made the
-    // answer claim dates a reader could not see.
+    // Date visibility is trace metadata, not part of the reply. Only dates
+    // present in the page text count as visible: Tavily's publishedAt is
+    // metadata, and listing it made the answer claim dates a reader could not
+    // see. Keeping it here means the trace still explains a freshness decision
+    // without dumping it into the chat.
     const dated: string[] = [];
     const relative: string[] = [];
     for (const source of sources) {
@@ -241,7 +226,6 @@ export async function ground(
       dateParts.length > 0
         ? dateParts.join(" ")
         : "No publication date was visible in the retrieved sources.";
-    final += `\n\n${note}`;
 
     return {
       answer: final.trim(),

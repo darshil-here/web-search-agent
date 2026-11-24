@@ -14,11 +14,23 @@
 // stating "$59,979").
 import { flatten } from "./text.js";
 
-/** A number as written: its value and the precision the writer used. */
-type Measure = { value: number; decimals: number };
+/** A number as written: its base value and the step its writer rounded to. */
+type Measure = { value: number; step: number };
 
-/** A number with thousands separators and at most one decimal part. */
-const NUMBER_TOKEN = /\d+(?:,\d{3})*(?:\.\d+)?/g;
+/**
+ * A number with thousands separators, at most one decimal part, and an
+ * optional magnitude word. "$5.13 trillion" is the same value as
+ * 5,133,702,791,168 rounded to the claim's precision; readers should not have
+ * to dump 13-digit integers.
+ */
+const MEASURE_TOKEN =
+  /(\d+(?:,\d{3})*(?:\.\d+)?)(?:\s*(thousand|million|billion|trillion)\b)?/gi;
+const SCALE: Record<string, number> = {
+  thousand: 1e3,
+  million: 1e6,
+  billion: 1e9,
+  trillion: 1e12,
+};
 const URL = /https?:\/\/[^\s)\]|,]+/g;
 
 function escapeRegExp(value: string): string {
@@ -30,9 +42,10 @@ function normalise(text: string): string {
   return flatten(text).replace(/\*/g, "").toLowerCase();
 }
 
-/** Text without markdown link targets or bare URLs, for claim matching. */
+/** Text without markdown links, bracketed citations or bare URLs. */
 function plain(text: string): string {
   return flatten(text)
+    .replace(/\[\s*https?:\/\/[^\]]*\]/gi, " ")
     .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
     .replace(URL, " ");
 }
@@ -62,33 +75,35 @@ export function isVerbatimQuote(quote: string, text: string): boolean {
   return needle.length >= 8 && findNeedle(normalise(text), needle) !== null;
 }
 
-function measure(raw: string): Measure | null {
+function measure(raw: string, scaleWord?: string): Measure | null {
   const cleaned = raw.replace(/,/g, "");
-  const value = Number(cleaned);
-  if (!Number.isFinite(value)) return null;
-  const fraction = cleaned.split(".")[1] ?? "";
-  return { value, decimals: fraction.length };
+  const number = Number(cleaned);
+  if (!Number.isFinite(number)) return null;
+  const decimals = cleaned.split(".")[1]?.length ?? 0;
+  const scale = scaleWord === undefined ? 1 : (SCALE[scaleWord.toLowerCase()] ?? 1);
+  return { value: number * scale, step: 10 ** -decimals * scale };
 }
 
 /** Every number in a claim, in the order written. */
 export function claimMeasures(text: string): Measure[] {
-  return [...plain(text).matchAll(NUMBER_TOKEN)]
-    .map((match) => measure(match[0]))
+  return [...plain(text).matchAll(MEASURE_TOKEN)]
+    .map((match) => measure(match[1] ?? "", match[2]))
     .filter((item): item is Measure => item !== null);
 }
 
 /**
  * True when `text` states a number that rounds to the claim's value at the
- * claim's precision. A page publishing 59,979.21 states "$59,979"; a claim
- * cannot add precision the page does not have.
+ * claim's precision. A page publishing 59,979.21 states "$59,979"; a page
+ * publishing 5,133,702,791,168 states "$5.13 trillion". A claim cannot add
+ * precision the page does not have.
  */
 function statesMeasure(text: string, claim: Measure): boolean {
-  const factor = 10 ** claim.decimals;
-  for (const match of plain(text).matchAll(NUMBER_TOKEN)) {
-    const stated = measure(match[0]);
+  for (const match of plain(text).matchAll(MEASURE_TOKEN)) {
+    const stated = measure(match[1] ?? "", match[2]);
     if (stated === null) continue;
-    const rounded = Math.round(stated.value * factor) / factor;
-    if (Math.abs(rounded - claim.value) < 1e-9) return true;
+    const rounded = Math.round(stated.value / claim.step) * claim.step;
+    const tolerance = Math.abs(claim.value) * 1e-12 + 1e-9;
+    if (Math.abs(rounded - claim.value) <= tolerance) return true;
   }
   return false;
 }
@@ -191,7 +206,13 @@ export function applyEvidence(
 
     if (isTableRow(line)) {
       if (isSeparator(line) || headers.has(index)) return line;
-      return line.split("|").map(gradeCell).join("|");
+      // The first visible column is the row's name (a platform, plan or
+      // feature). Never replace it with "Not stated": an unsupported value in
+      // another column must not erase which row it belonged to.
+      return line
+        .split("|")
+        .map((cell, column) => (column === 1 ? cell : gradeCell(cell)))
+        .join("|");
     }
 
     const sentences = line.split(/(?<=[.!?;])\s+/);

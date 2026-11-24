@@ -50,6 +50,13 @@ error string. Feature attribution — is this number about the same thing as the
 sentence — is left to the model, because encoding it in code produced false
 negatives on live prices.
 
+Citations are evidence, not decoration. After verification they are removed from
+the prose and table cells and rendered once as a short Sources list with human
+labels ("Yahoo Finance", not the URL). Publication dates and relative update
+times stay in the trace; the reply names freshness only when it changes the
+answer, in the source's own words. A table's first column is the row's name and
+is never replaced by "Not stated".
+
 The re-check path is deliberately not an agent. It pulls the claims recorded on
 the named date, searches each subject twice (the recorded attribute, then
 changelog or release notes), and compares the fresh values in code. The answer

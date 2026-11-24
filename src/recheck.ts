@@ -13,6 +13,7 @@ import type { RecheckIntent } from "./detect.js";
 import type { Llm, LlmCall, PromptMessage, StopReason, Usage } from "./llm.js";
 import type { SearchResult } from "./search.js";
 import { clip } from "./text.js";
+import { sourcesSection, stripCitations, urlsIn } from "./sources.js";
 import { guardUnverified } from "./unverified.js";
 import { isVerbatimQuote } from "./support.js";
 import { canonicalUrl } from "./url.js";
@@ -888,7 +889,7 @@ export async function recheck(args: {
   }
 
   return newReport(intent, {
-    answer,
+    answer: stripCitations(answer) + sourcesSection(urlsIn(answer), sources),
     answerKind: failed ? "fallback" : "model",
     stopReason: "answered",
     queries,

@@ -492,8 +492,11 @@ export const CASES: EvalCase[] = [
     probe: () => ({}),
     check: () => null, // source-date extraction is still a known gap
     rubric: {
-      must: ["an official or dated source", "a note when the source has no visible date"],
-      mustNot: ["a launch-era article used as current evidence"],
+      must: ["an official or dated source"],
+      mustNot: [
+        "a launch-era article used as current evidence",
+        "a dump of publication dates or relative update times",
+      ],
     },
   },
   {
