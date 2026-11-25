@@ -8,9 +8,22 @@ const sources: EnrichedSource[] = [
   {
     title: "N",
     url: "https://n.test",
-    content: "10 GB",
+    content: "Neon offers 10 GB of storage.",
     pageText: null,
     publishedAt: null,
+  },
+];
+
+const PRICE_QUOTE =
+  "Regular market price: 59,979.21 -1,623.04 (-2.63%) as of 2026-11-24 17:38 UTC";
+
+const price: EnrichedSource[] = [
+  {
+    title: "Bitcoin BTC (BTC-USD) Live Price, News, Chart & Price History",
+    url: "https://finance.test/quote/BTC-USD",
+    content: `CCC • USD\n\n${PRICE_QUOTE}\n\nMarket state: REGULAR`,
+    pageText: null,
+    publishedAt: "2026-11-24",
   },
 ];
 
@@ -27,51 +40,129 @@ function llmReturning(payload: unknown, fail = false): Llm {
   };
 }
 
-test("needsGrounding is true for tables and number-heavy prose", () => {
+test("needsGrounding covers tables, numbers and citations", () => {
   assert.equal(needsGrounding("| a | b |\n|---|---|\n| 1 | 2 |"), true);
   assert.equal(needsGrounding("One is 10 GB, two is 20 GB, three is 30 GB."), true);
+  // A short factual answer used to be skipped because it had only one number.
+  assert.equal(needsGrounding("It costs $10 per month."), true);
+  // A citation with no number is still a claim to verify.
+  assert.equal(needsGrounding("Yes. [https://investor.nvidia.com/announcement]"), true);
 });
 
-test("needsGrounding ignores years in a single-claim answer", () => {
-  assert.equal(
-    needsGrounding(
-      "As of November 2026, the latest stable Node.js release is v26.13.1 [https://nodejs.org]."
-    ),
-    false
-  );
-});
-
-test("needsGrounding is false for plain prose", () => {
+test("needsGrounding skips answers with no fact to check", () => {
   assert.equal(needsGrounding("I do not know the answer."), false);
-  assert.equal(needsGrounding("It costs $10 per month."), false);
+  // A calendar year is not a measurement.
+  assert.equal(needsGrounding("In 2026 nothing changed."), false);
 });
 
-test("ground attaches source URLs and marks unsupported statements", async () => {
+test("ground keeps a claim backed by a verbatim quote", async () => {
   const result = await ground(
     llmReturning({
-      revisedAnswer:
-        "Neon has 10 GB [https://n.test]. Supabase has 99 GB [https://invented.test].",
+      revisedAnswer: "Neon offers 10 GB storage [https://n.test].",
       statements: [
-        { text: "Neon has 10 GB", url: "https://n.test", supported: true },
         {
-          text: "Supabase has 99 GB",
-          url: "https://invented.test",
-          supported: false,
+          text: "Neon offers 10 GB storage",
+          url: "https://n.test",
+          quote: "Neon offers 10 GB of storage.",
         },
       ],
     }),
-    "Neon has 10 GB. Supabase has 99 GB.",
+    "Neon offers 10 GB storage.",
+    sources,
+    "How much storage?"
+  );
+
+  assert.match(result.answer, /10 GB storage/);
+  assert.deepEqual(result.droppedClaims, []);
+  assert.equal(result.dropped, 0);
+});
+
+test("a live price survives when the quote publishes cents", async () => {
+  const result = await ground(
+    llmReturning({
+      revisedAnswer:
+        "Bitcoin is $59,979 USD (Yahoo Finance quote, timestamped Nov 24, 2026 at 17:38 UTC). [https://finance.test/quote/BTC-USD]",
+      statements: [
+        {
+          text: "Bitcoin is $59,979 USD",
+          url: "https://finance.test/quote/BTC-USD",
+          quote: PRICE_QUOTE,
+        },
+      ],
+    }),
+    "Bitcoin is $59,979 USD (Yahoo Finance quote, timestamped Nov 24, 2026 at 17:38 UTC).",
+    price,
+    "What is the bitcoin price today? in usd"
+  );
+
+  assert.match(result.answer, /\$59,979 USD/);
+  assert.deepEqual(result.droppedClaims, []);
+});
+
+test("a claim whose quote is not in the page is removed", async () => {
+  const result = await ground(
+    llmReturning({
+      revisedAnswer: "Bitcoin is $59,979 USD today [https://finance.test/quote/BTC-USD].",
+      statements: [
+        {
+          text: "Bitcoin is $59,979 USD today",
+          url: "https://finance.test/quote/BTC-USD",
+          quote: "Bitcoin is $59,979 USD today",
+        },
+      ],
+    }),
+    "Bitcoin is $59,979 USD today.",
+    price,
+    "What is the bitcoin price today? in usd"
+  );
+
+  assert.doesNotMatch(result.answer, /\$59,979/);
+  assert.match(result.answer, /could not verify/i);
+  assert.equal(result.droppedClaims.length, 1);
+});
+
+test("a quote that omits the claim's number does not verify it", async () => {
+  const result = await ground(
+    llmReturning({
+      revisedAnswer: "Neon has 10 branches [https://n.test].",
+      statements: [
+        {
+          text: "Neon has 10 branches",
+          url: "https://n.test",
+          quote: "Neon offers storage.",
+        },
+      ],
+    }),
+    "Neon has 10 branches.",
+    sources,
+    "How many branches?"
+  );
+
+  assert.doesNotMatch(result.answer, /10 branches/);
+  assert.doesNotMatch(result.answer, /not stated in sources/i);
+});
+
+test("an unsupported table cell becomes Not stated in place", async () => {
+  const result = await ground(
+    llmReturning({
+      revisedAnswer:
+        "| Feature | Neon |\n|---|---|\n| Branching | 10 branches [https://n.test] |",
+      statements: [
+        {
+          text: "10 branches",
+          url: "https://n.test",
+          quote: "Neon offers branching features.",
+        },
+      ],
+    }),
+    "| Feature | Neon |\n|---|---|\n| Branching | 10 branches |",
     sources,
     "Compare the tiers"
   );
-  assert.match(result.answer, /https:\/\/n\.test/);
-  assert.doesNotMatch(result.answer, /invented\.test/);
-  assert.match(result.answer, /not stated in sources/);
-  assert.equal(result.dropped, 1);
-  // The critic's own unsupported flag is enforced in the answer text, not just
-  // counted and accompanied by a vague global note.
-  assert.doesNotMatch(result.answer, /Supabase has 99 GB/);
-  assert.equal(result.replaced.length, 1);
+
+  assert.match(result.answer, /\| Branching \| Not stated/);
+  assert.match(result.answer, /\| Feature \| Neon \|/);
+  assert.doesNotMatch(result.answer, /10 branches/);
 });
 
 test("a tracked variant of a retrieved URL keeps the citation", async () => {
@@ -93,7 +184,6 @@ test("a tracked variant of a retrieved URL keeps the citation", async () => {
           text: "up to 2 active projects",
           url: "https://supabase.test/pricing",
           quote: "Free: 2 active projects.",
-          supported: true,
         },
       ],
     }),
@@ -102,13 +192,11 @@ test("a tracked variant of a retrieved URL keeps the citation", async () => {
     "Compare the tiers"
   );
 
-  // The critic's URL is the same page as the tracked one search returned, so
-  // the answer points at the URL that was actually fetched.
   assert.doesNotMatch(result.answer, /\[\]/);
   assert.match(result.answer, /supabase\.test\/pricing\?ref=scrimba\.com/);
 });
 
-test("an invented URL is removed with its brackets, not left empty", async () => {
+test("an invented URL cannot verify a claim and is removed", async () => {
   const result = await ground(
     llmReturning({
       revisedAnswer: "Neon has 10 GB [https://invented.test].",
@@ -116,8 +204,7 @@ test("an invented URL is removed with its brackets, not left empty", async () =>
         {
           text: "Neon has 10 GB",
           url: "https://invented.test",
-          quote: null,
-          supported: false,
+          quote: "Neon has 10 GB.",
         },
       ],
     }),
@@ -128,6 +215,7 @@ test("an invented URL is removed with its brackets, not left empty", async () =>
 
   assert.doesNotMatch(result.answer, /invented\.test/);
   assert.doesNotMatch(result.answer, /\[\]/);
+  assert.doesNotMatch(result.answer, /10 GB/);
 });
 
 test("a snippet that states the value survives a fetched page that omits it", async () => {
@@ -149,7 +237,6 @@ test("a snippet that states the value survives a fetched page that omits it", as
           text: "Neon includes up to 6 hours of recovery",
           url: "https://n.test/pricing",
           quote: "Free: up to 6 hours or 1 GB of data changes.",
-          supported: true,
         },
       ],
     }),
@@ -158,181 +245,34 @@ test("a snippet that states the value survives a fetched page that omits it", as
     "How much recovery?"
   );
 
-  // The fetch returned a page without the limit, but the retrieved snippet had
-  // it; one must not hide the other.
-  assert.doesNotMatch(result.answer, /not stated in sources/);
+  assert.doesNotMatch(result.answer, /could not verify/i);
   assert.match(result.answer, /6 hours/);
 });
 
-test("ground cleans a qualifier left before the critic's marker", async () => {
-  const result = await ground(
-    llmReturning({
-      revisedAnswer:
-        "| Auth | Up to **not stated in sources** [https://n.test] |",
-      statements: [
-        {
-          text: "Auth quota",
-          url: "https://n.test",
-          quote: null,
-          supported: false,
-        },
-      ],
-    }),
-    "| Auth | Up to 60,000 MAUs [https://n.test] |",
-    sources,
-    "Compare auth quotas"
-  );
-
-  assert.doesNotMatch(result.answer, /up to \*{0,2}not stated/i);
-  assert.match(result.answer, /not stated in sources/);
-});
-
-test("ground marks a numeric claim whose value no source states", async () => {
-  const result = await ground(
-    llmReturning({
-      revisedAnswer:
-        "Neon has 10 branches [https://n.test].",
-      statements: [
-        {
-          text: "Neon has 10 branches",
-          url: "https://n.test",
-          supported: true,
-        },
-      ],
-    }),
-    "Neon has 10 branches.",
-    sources,
-    "Compare the free tiers"
-  );
-
-  assert.match(result.answer, /not stated in sources/);
-  assert.doesNotMatch(result.answer, /10 branches/);
-  assert.equal(result.replaced.length, 1);
-});
-
-test("a live price survives the critic when the page writes it with cents", async () => {
-  // The live run: the critic grounded "$59,979 USD" with a Yahoo Finance quote
-  // whose price line is "Regular market price: 59,979.21". Code rewrote the
-  // correct value as "not stated in sources" because it compared the digits
-  // literally. A rounded price the page states must survive.
-  const price: EnrichedSource[] = [
-    {
-      title: "Bitcoin BTC (BTC-USD) Live Price, News, Chart & Price History",
-      url: "https://finance.test/quote/BTC-USD",
-      content:
-        "CCC • USD\n\nRegular market price: 59,979.21 -1,623.04 (-2.63%) as of 2026-11-24 17:38 UTC\n\nMarket state: REGULAR",
-      pageText: null,
-      publishedAt: "2026-11-24",
-    },
-  ];
-  const result = await ground(
-    llmReturning({
-      revisedAnswer:
-        "Bitcoin is $59,979 USD (Yahoo Finance quote, timestamped Nov 24, 2026 at 17:38 UTC). [https://finance.test/quote/BTC-USD]",
-      statements: [
-        {
-          text: "Bitcoin is $59,979 USD",
-          url: "https://finance.test/quote/BTC-USD",
-          quote:
-            "Regular market price: 59,979.21 -1,623.04 (-2.63%) as of 2026-11-24 17:38 UTC",
-          supported: true,
-        },
-      ],
-    }),
-    "Bitcoin is $59,979 USD (Yahoo Finance quote, timestamped Nov 24, 2026 at 17:38 UTC).",
-    price,
-    "What is the bitcoin price today? in usd"
-  );
-
-  assert.doesNotMatch(result.answer, /not stated in sources/);
-  assert.match(result.answer, /\$59,979 USD/);
-  assert.deepEqual(result.replaced, []);
-});
-
-test("ground keeps a value supported by a verbatim quote naming its feature", async () => {
-  const quoted: EnrichedSource[] = [
-    {
-      title: "N",
-      url: "https://n.test",
-      content: "Free: 10 GB storage, 2 active projects.",
-      pageText: "Free: 10 GB storage, 2 active projects.",
-      publishedAt: null,
-    },
-  ];
-  const result = await ground(
-    llmReturning({
-      revisedAnswer: "Neon has 10 GB storage [https://n.test].",
-      statements: [
-        {
-          text: "Neon has 10 GB storage",
-          url: "https://n.test",
-          quote: "Free: 10 GB storage",
-          supported: true,
-        },
-      ],
-    }),
-    "Neon has 10 GB storage.",
-    quoted,
-    "How much storage?"
-  );
-
-  assert.doesNotMatch(result.answer, /not stated in sources/);
-  assert.equal(result.replaced.length, 0);
-});
-
-test("ground rejects a quote that is not verbatim in the cited source", async () => {
-  const quoted: EnrichedSource[] = [
-    {
-      title: "N",
-      url: "https://n.test",
-      content: "Free: 10 GB storage, 2 active projects.",
-      pageText: "Free: 10 GB storage, 2 active projects.",
-      publishedAt: null,
-    },
-  ];
-  const result = await ground(
-    llmReturning({
-      revisedAnswer: "Neon has 10 GB RAM [https://n.test].",
-      statements: [
-        {
-          text: "Neon has 10 GB RAM",
-          url: "https://n.test",
-          quote: "Neon has 10 GB RAM",
-          supported: true,
-        },
-      ],
-    }),
-    "Neon has 10 GB RAM.",
-    quoted,
-    "How much RAM?"
-  );
-
-  // The critic invented the quote; an unverified quote is not evidence, so the
-  // value is marked rather than accepted because the number happens to exist.
-  assert.match(result.answer, /not stated in sources/);
-  assert.doesNotMatch(result.answer, /10 GB RAM/);
-  assert.equal(result.replaced.length, 1);
-});
-
-test("ground appends a no-date note when no source has a date", async () => {
+test("date visibility stays in the trace, not the reply", async () => {
   const result = await ground(
     llmReturning({
       revisedAnswer: "Costs $10 [https://n.test].",
-      statements: [],
+      statements: [
+        { text: "Costs $10", url: "https://n.test", quote: "Neon offers 10 GB of storage." },
+      ],
     }),
     "Costs $10.",
     sources,
     "What is the price?"
   );
-  assert.match(result.answer, /no publication date/i);
-  assert.ok(result.note);
+  assert.doesNotMatch(result.answer, /publication date/i);
+  assert.doesNotMatch(result.answer, /visible in sources/i);
+  assert.match(result.note ?? "", /no publication date/i);
 });
 
-test("a relative update is noted instead of metadata dates", async () => {
+test("a relative update is traced, not appended to the reply", async () => {
   const result = await ground(
     llmReturning({
       revisedAnswer: "Costs $20 [https://n.test].",
-      statements: [],
+      statements: [
+        { text: "Costs $20", url: "https://n.test", quote: "Price: $20/month." },
+      ],
     }),
     "Costs $20.",
     [
@@ -347,16 +287,19 @@ test("a relative update is noted instead of metadata dates", async () => {
     "What is the price?"
   );
 
-  assert.match(result.answer, /relative update time/i);
-  assert.match(result.answer, /18 hours ago/);
-  assert.doesNotMatch(result.answer, /2023/);
+  assert.doesNotMatch(result.answer, /relative update time/i);
+  assert.doesNotMatch(result.answer, /18 hours ago/);
+  assert.match(result.note ?? "", /18 hours ago/);
+  assert.doesNotMatch(result.note ?? "", /2023/);
 });
 
-test("a date visible in the page text is still listed", async () => {
+test("a visible page date is traced, not appended to the reply", async () => {
   const result = await ground(
     llmReturning({
       revisedAnswer: "Costs $20 [https://n.test].",
-      statements: [],
+      statements: [
+        { text: "Costs $20", url: "https://n.test", quote: "Price: $20/month." },
+      ],
     }),
     "Costs $20.",
     [
@@ -371,7 +314,178 @@ test("a date visible in the page text is still listed", async () => {
     "What is the price?"
   );
 
-  assert.match(result.answer, /2026-11-04/);
+  assert.doesNotMatch(result.answer, /2026-11-04/);
+  assert.match(result.answer, /Costs \$20/);
+  assert.match(result.note ?? "", /2026-11-04/);
+});
+
+test("citations move to a Sources list with a human label", async () => {
+  const result = await ground(
+    llmReturning({
+      revisedAnswer:
+        "Bitcoin is $59,979 USD [https://finance.test/quote/BTC-USD]. Coinbase agrees [https://finance.test/quote/BTC-USD].",
+      statements: [
+        {
+          text: "Bitcoin is $59,979 USD",
+          url: "https://finance.test/quote/BTC-USD",
+          quote: PRICE_QUOTE,
+        },
+        {
+          text: "Coinbase agrees",
+          url: "https://finance.test/quote/BTC-USD",
+          quote: "Coinbase agrees",
+        },
+      ],
+    }),
+    "Bitcoin is $59,979 USD. Coinbase agrees.",
+    [
+      {
+        title: "Bitcoin BTC (BTC-USD) Live Price - Yahoo Finance",
+        url: "https://finance.test/quote/BTC-USD",
+        content: `Coinbase agrees\n${PRICE_QUOTE}`,
+        pageText: null,
+        publishedAt: null,
+      },
+      {
+        title: "An unused result",
+        url: "https://unused.test/page",
+        content: "Not cited.",
+        pageText: null,
+        publishedAt: null,
+      },
+    ],
+    "What is the bitcoin price today? in usd"
+  );
+
+  assert.doesNotMatch(result.answer, /\[https?:\/\//);
+  const [prose] = result.answer.split("**Sources:**");
+  assert.doesNotMatch(prose, /https?:\/\//, "raw URL leaked into prose");
+  assert.match(result.answer, /\*\*Sources:\*\*/);
+  assert.match(
+    result.answer,
+    /\[Yahoo Finance\]\(https:\/\/finance\.test\/quote\/BTC-USD\)/
+  );
+  assert.equal(result.answer.match(/finance\.test/g)?.length, 1, result.answer);
+  assert.doesNotMatch(result.answer, /unused\.test/);
+});
+
+test("a table cell keeps its value and the row keeps its name", async () => {
+  const answer =
+    "| Platform | Bandwidth |\n|---|---|\n| Netlify | 100 GB [https://netlify.test/pricing] |\n| Vercel | 200 GB [https://vercel.test/pricing] |";
+  const result = await ground(
+    llmReturning({
+      revisedAnswer: answer,
+      statements: [
+        {
+          text: "Netlify 100 GB",
+          url: "https://netlify.test/pricing",
+          quote: "Netlify Free includes 100 GB bandwidth.",
+        },
+        {
+          text: "Vercel 200 GB",
+          url: "https://vercel.test/pricing",
+          quote: "Vercel Hobby includes 200 GB bandwidth.",
+        },
+      ],
+    }),
+    answer,
+    [
+      {
+        title: "Netlify Pricing",
+        url: "https://netlify.test/pricing",
+        content: "Netlify Free includes 100 GB bandwidth.",
+        pageText: null,
+        publishedAt: null,
+      },
+      {
+        title: "Vercel Pricing",
+        url: "https://vercel.test/pricing",
+        content: "Vercel Hobby includes 200 GB bandwidth.",
+        pageText: null,
+        publishedAt: null,
+      },
+    ],
+    "Compare the free tiers"
+  );
+
+  assert.doesNotMatch(result.answer, /\[https?:\/\//);
+  assert.match(result.answer, /\| Netlify \| 100 GB \|/);
+  assert.match(result.answer, /\| Vercel \| 200 GB \|/);
+  assert.match(result.answer, /\[Netlify Pricing\]/);
+  assert.match(result.answer, /\[Vercel Pricing\]/);
+});
+
+test("an unverified value does not erase the platform name", async () => {
+  const answer =
+    "| Platform | Bandwidth |\n|---|---|\n| Netlify | 100 GB |\n| Vercel | 200 GB |";
+  const result = await ground(
+    llmReturning({
+      revisedAnswer: answer,
+      statements: [
+        {
+          text: "Netlify 100 GB",
+          url: "https://netlify.test/pricing",
+          quote: "Netlify Free includes 100 GB bandwidth.",
+        },
+        {
+          text: "Vercel 200 GB",
+          url: "https://vercel.test/pricing",
+          quote: "Vercel Hobby includes 5 GB bandwidth.",
+        },
+      ],
+    }),
+    answer,
+    [
+      {
+        title: "Netlify Pricing",
+        url: "https://netlify.test/pricing",
+        content: "Netlify Free includes 100 GB bandwidth.",
+        pageText: null,
+        publishedAt: null,
+      },
+      {
+        title: "Vercel Pricing",
+        url: "https://vercel.test/pricing",
+        content: "Vercel Hobby includes 5 GB bandwidth.",
+        pageText: null,
+        publishedAt: null,
+      },
+    ],
+    "Compare the free tiers"
+  );
+
+  assert.match(result.answer, /\| Netlify \| 100 GB \|/);
+  assert.match(result.answer, /\| Vercel \| Not stated \|/);
+});
+
+test("a magnitude in prose verifies against a raw total", async () => {
+  const result = await ground(
+    llmReturning({
+      revisedAnswer:
+        "Apple's market cap is $5.13 trillion [https://finance.test/quote/AAPL].",
+      statements: [
+        {
+          text: "Apple's market cap is $5.13 trillion",
+          url: "https://finance.test/quote/AAPL",
+          quote: "Market cap 5,133,702,791,168",
+        },
+      ],
+    }),
+    "Apple's market cap is $5.13 trillion.",
+    [
+      {
+        title: "Apple Inc. (AAPL) Stock Price - Yahoo Finance",
+        url: "https://finance.test/quote/AAPL",
+        content: "Market cap 5,133,702,791,168",
+        pageText: null,
+        publishedAt: null,
+      },
+    ],
+    "What is Apple's market cap?"
+  );
+
+  assert.match(result.answer, /\$5\.13 trillion/);
+  assert.doesNotMatch(result.answer, /could not verify/i);
 });
 
 test("canonicalising a cleaned URL does not append its fragment twice", async () => {
@@ -382,8 +496,7 @@ test("canonicalising a cleaned URL does not append its fragment twice", async ()
         {
           text: "Price: $20",
           url: "https://supabase.test/pricing",
-          quote: null,
-          supported: true,
+          quote: "Price: $20.",
         },
       ],
     }),
@@ -400,11 +513,123 @@ test("canonicalising a cleaned URL does not append its fragment twice", async ()
     "What is the price?"
   );
 
-  assert.equal(
-    result.answer.match(/#compare-plans/g)?.length,
-    1,
-    result.answer
+  assert.equal(result.answer.match(/#compare-plans/g)?.length, 1, result.answer);
+});
+
+test("a prose answer is assembled from statements, not matched back", async () => {
+  const nodeQuote = "| 26 (LTS) | 6 months ago (05 May 2026) | ... | 26.13.1 (11 Nov 2026) |";
+  const pythonQuote = "Python 3.15.2 - Oct. 25, 2026";
+  const result = await ground(
+    llmReturning({
+      // A paraphrase that the old sentence matcher could not line up with the
+      // statements. It must not matter: the statements are the answer.
+      revisedAnswer:
+        "- **Node.js LTS:** Node 26.13.1 is the newest LTS, dated 11 Nov 2026.\n- **Python stable:** Python 3.15.2 came out on Oct. 25, 2026.",
+      statements: [
+        {
+          text: "- **Node.js LTS:** The releases table lists **v26.13.1** as the latest release for the LTS v26 line, dated **11 Nov 2026**.",
+          url: "https://endoflife.test/nodejs",
+          quote: nodeQuote,
+        },
+        {
+          text: "- **Python stable:** Python.org identifies **Python 3.15.2** as the latest Python 3 release, dated **Oct. 25, 2026**.",
+          url: "https://python.test/downloads",
+          quote: pythonQuote,
+        },
+      ],
+    }),
+    "Node.js 26.13.1 is the latest LTS. Python 3.15.2 is the latest stable release.",
+    [
+      {
+        title: "Node.js | endoflife.date",
+        url: "https://endoflife.test/nodejs",
+        content: nodeQuote,
+        pageText: null,
+        publishedAt: null,
+      },
+      {
+        title: "Python Releases for Windows | Python.org",
+        url: "https://python.test/downloads",
+        content: pythonQuote,
+        pageText: null,
+        publishedAt: null,
+      },
+    ],
+    "What are the latest stable release versions of Node.js LTS and Python?"
   );
+
+  assert.doesNotMatch(result.answer, /could not verify/i);
+  assert.match(result.answer, /v26\.13\.1/);
+  assert.match(result.answer, /11 Nov 2026/);
+  assert.match(result.answer, /Python 3\.15\.2/);
+  assert.match(result.answer, /Oct\. 25, 2026/);
+  assert.deepEqual(result.droppedClaims, []);
+  assert.equal(result.checked.length, 2);
+  assert.deepEqual(
+    result.checked.map((item) => item.supported),
+    [true, true]
+  );
+});
+
+test("the trace records each statement, its quote and its verdict", async () => {
+  const result = await ground(
+    llmReturning({
+      revisedAnswer: "Costs $10 [https://n.test].",
+      statements: [
+        {
+          text: "Costs $10",
+          url: "https://n.test",
+          quote: "Neon offers 10 GB of storage.",
+        },
+        {
+          text: "Costs $99",
+          url: "https://n.test",
+          quote: "Neon offers 10 GB of storage.",
+        },
+      ],
+    }),
+    "Costs $10.",
+    sources,
+    "What is the price?"
+  );
+
+  assert.deepEqual(result.checked[0], {
+    text: "Costs $10",
+    url: "https://n.test",
+    quote: "Neon offers 10 GB of storage.",
+    supported: true,
+  });
+  assert.equal(result.checked[1]?.supported, false);
+  assert.match(result.answer, /Costs \$10/);
+  assert.doesNotMatch(result.answer, /\$99/);
+});
+
+test("a url-less entry cannot bypass verification with a claim", async () => {
+  const result = await ground(
+    llmReturning({
+      revisedAnswer: "Neon is faster. Neon costs $19.",
+      statements: [
+        // No number, but an assertion about a product: not a lead-in.
+        { text: "Neon is faster than Supabase.", url: null, quote: null },
+        // A number in an entry pretending to be connective.
+        { text: "Neon costs $19.", url: null, quote: null },
+        // A genuine lead-in still survives.
+        { text: "Here is the pricing:", url: null, quote: null },
+      ],
+    }),
+    "Neon is faster. Neon costs $19.",
+    sources,
+    "How does Neon compare?"
+  );
+
+  assert.doesNotMatch(result.answer, /faster/);
+  assert.doesNotMatch(result.answer, /\$19/);
+  assert.match(result.answer, /Here is the pricing:/);
+  assert.deepEqual(
+    result.checked.map((item) => item.supported),
+    [false, false, true]
+  );
+  assert.equal(result.droppedClaims.length, 2);
 });
 
 test("ground keeps the original answer when the critic fails", async () => {

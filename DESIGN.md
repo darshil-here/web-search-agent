@@ -41,9 +41,26 @@ for the ledger, and the next turn still sees the fact.
 
 The normal loop gives the model exactly one tool, `web_search`, and five steps.
 Code ranks sources by freshness before the model sees them. If an answer has a
-table or three or more numbers, a grounding pass fetches the cited pages and
-checks each value against the text beside its citation. Anything the page does
-not state becomes "not stated in sources".
+table, a citation, or any real number, a grounding pass fetches the cited pages.
+The model returns the answer's prose as ordered statements, each with the URL
+and a verbatim quote that supports it. Code verifies only two things: the quote
+is contiguous in the cited text, and the statement's numbers appear in that
+quote. A prose answer is then assembled from the verified statements; there is
+no sentence splitting and no matching rewritten text back onto a draft, which
+is what once lost verified Node.js and Python claims to a paraphrase and an
+"Oct." abbreviation. A table keeps its rendered cells, because the table
+already delimits them; an unsupported cell becomes "Not stated" and the row's
+name in the first column is never touched. Feature attribution — is this number
+about the same thing as the sentence — is left to the model, because encoding
+it in code produced false negatives on live prices.
+
+Citations are evidence, not decoration. After verification they are removed from
+the prose and table cells and rendered once as a compact Sources line with human
+labels ("Yahoo Finance", not the URL). Publication dates and relative update
+times stay in the trace; the reply names freshness only when it changes the
+answer, in the source's own words. The trace also records every statement with
+its URL, quote and verdict, so the next grounding failure is diagnosable from
+the file rather than inferred.
 
 The re-check path is deliberately not an agent. It pulls the claims recorded on
 the named date, searches each subject twice (the recorded attribute, then
@@ -65,8 +82,8 @@ decides what to search. It does not decide whether to think, how much memory to
 load, or whether a value is supported.
 
 The same reason put the guards in functions instead of the system prompt.
-`support.ts` grades each numeric claim against the cited page. `unverified.ts`
-rewrites a sentence that presents an unverified value as current.
+`support.ts` checks a claim's verbatim quote and numeric presence.
+`unverified.ts` rewrites a sentence that presents an unverified value as current.
 `calibration.ts` hedges absolute claims no source supports. `scope.ts` removes
 sentences about concepts the user did not ask about. Prompts drift. Functions
 have tests.

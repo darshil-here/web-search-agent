@@ -214,3 +214,11 @@ test("never returns an empty answer", () => {
   const result = guardCalibration("Limits?", "Permanent.", sources);
   assert.ok(result.answer.trim().length > 0);
 });
+
+test("a no-op keeps bullets and paragraphs intact", () => {
+  const answer =
+    "Here are the releases:\n\n- **Node.js:** 26.13.1.\n- **Python:** 3.15.2.";
+  const result = guardCalibration("What are the latest releases?", answer, sources);
+  assert.equal(result.answer, answer);
+  assert.deepEqual(result.rewritten, []);
+});

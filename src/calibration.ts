@@ -106,5 +106,8 @@ export function guardCalibration(
   }
 
   if (kept.length === 0) return { answer, rewritten: [] };
+  // Nothing to rewrite means nothing to reflow: return the answer exactly as
+  // written so bullets, tables and paragraph breaks survive the no-op.
+  if (rewritten.length === 0) return { answer, rewritten: [] };
   return { answer: kept.join(" ").trim(), rewritten };
 }

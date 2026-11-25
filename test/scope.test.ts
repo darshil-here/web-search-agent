@@ -33,3 +33,11 @@ test("never returns an empty answer", () => {
   const result = guardScope("latest stable", "v27 alpha is experimental.");
   assert.equal(result.answer, "v27 alpha is experimental.");
 });
+
+test("keeps bullets, paragraphs and the date inside a sentence", () => {
+  const answer =
+    "Here are the releases:\n\n- **Node.js:** 26.13.1 dated Oct. 25, 2026.\n- **Python:** 3.15.2.";
+  const result = guardScope("What are the latest releases?", answer);
+  assert.equal(result.answer, answer);
+  assert.deepEqual(result.removed, []);
+});

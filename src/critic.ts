@@ -1,23 +1,41 @@
 // critic.ts
 //
 // Post-answer grounding. The model rewrites its own answer so every factual
-// claim carries an inline URL from the retrieved set. Code validates those
-// URLs and marks unsupported claims; the model never gets a new tool.
+// claim carries an inline URL and a verbatim quote from the cited page. Code
+// verifies the quote and the claim's numbers, removes any claim that does not
+// hold up, and lifts the surviving citations into one Sources list. The model
+// never gets a new tool.
 import type { Llm, Usage } from "./llm.js";
 import type { EnrichedSource } from "./search.js";
 import { expandInlineTables } from "./markdown.js";
+import { dropSourcesBlock, sourcesSection, stripCitations, urlsIn } from "./sources.js";
 import { extractSourceDate, relativeDateMention } from "./source-date.js";
-import { guardValueSupport, isVerbatimQuote, type SupportEvidence } from "./support.js";
+import {
+  applyEvidence,
+  assembleProse,
+  checkClaim,
+  claimMeasures,
+  isLeadIn,
+  type VerifiedStatement,
+} from "./support.js";
 import { canonicalUrl } from "./url.js";
 
 export type GroundResult = {
   answer: string;
   statements: number;
+  /** Statements whose evidence did not verify. */
   dropped: number;
-  /** Values the critic asserted but no retrieved source stated, rewritten in code. */
-  replaced: string[];
+  /** The sentences or cells actually removed from the answer. */
+  droppedClaims: string[];
+  /** Every statement, its evidence and verdict, for the trace. */
+  checked: Array<{
+    text: string;
+    url: string | null;
+    quote: string | null;
+    supported: boolean;
+  }>;
   note: string | null;
-  /** The evidence the guard graded against, traced for the eval judge. */
+  /** The evidence the critic graded against, traced for the eval judge. */
   sources?: Array<{ url: string; text: string }>;
   error?: string;
   usage: Usage;
@@ -25,41 +43,67 @@ export type GroundResult = {
 
 const NUMBER = /\b\d+(?:\.\d+)?\b/g;
 const YEAR = /^(?:19|20)\d{2}$/;
+const HAS_URL = /https?:\/\/[^\s)\]|,]+/;
 
 export function needsGrounding(answer: string): boolean {
   const hasTable = answer
     .split("\n")
     .some((line) => line.trimStart().startsWith("|"));
-  // A calendar year is not a measurement. Counting years made a simple
-  // "as of 2026, the latest version is v26.13.1" answer look like a
-  // number-heavy answer, so it fetched pages and rewrote the version. Ground
-  // tables and answers with several real measures; leave one-claim answers
-  // to the model's citation.
-  const numbers = new Set(
-    (answer.match(NUMBER) ?? []).filter((value) => !YEAR.test(value))
+  // A calendar year is not a measurement.
+  const numbers = (answer.match(NUMBER) ?? []).filter(
+    (value) => !YEAR.test(value)
   );
-  return hasTable || numbers.size >= 3;
+  // Any citation or any real number is enough. Gating on three numbers skipped
+  // short factual answers such as "NVIDIA reinstated Jensen Huang [URL]", which
+  // is exactly the shape a hallucinated claim takes.
+  return hasTable || HAS_URL.test(answer) || numbers.length > 0;
 }
 
 const CRITIC_INSTRUCTIONS = `You revise a research answer so every factual claim is grounded.
 
 You are given the original answer and the sources that were retrieved. Return:
-- revisedAnswer: the same answer with the same markdown structure, but with an
-  inline source URL beside every factual claim, written as [URL]. For a table,
-  put the URL in the relevant cell. Use ONLY URLs from the source list.
-- statements: one entry per factual claim with its text, the URL used, a quote,
-  and supported: true if the source states it, false if it does not.
-  The quote must be an exact contiguous excerpt from that URL's text, copied
-  word for word, that states the claim's value together with the feature it
-  belongs to. Do not paraphrase and do not join separate sentences. If no
-  sentence states it, set quote to null and supported to false. For a table
-  cell, quote the source sentence that supports that cell's value for that
-  vendor, not a sentence about a different feature or a different vendor.
-  A statement with supported: false must be rendered as "not stated in sources"
-  in revisedAnswer instead of being asserted.
+- revisedAnswer: the answer with the same markdown structure and an inline
+  source URL beside every factual claim, written as [URL]. It is used only to
+  lay out a markdown table. For a prose answer, the statements below are what
+  the reader sees, so keep this text consistent with them. Use ONLY URLs from
+  the source list. Do not write your own Sources section.
+- statements: the prose answer in reading order, one entry per sentence or
+  bullet line. Code renders these entries verbatim; it never splits or
+  rewrites them, so every sentence the reader should see must be its own entry.
+  - text: the sentence or bullet exactly as it should appear, WITHOUT a URL.
+    Keep a bullet's "- " marker. Split separate claims into separate entries.
+    Connective prose that makes no factual claim is an entry too, with url and
+    quote null, but only a section heading or a lead-in that ends with a colon
+    qualifies. Any sentence that says something about a product needs its URL
+    and quote, even when it contains no number.
+  - url: the source URL for the claim, or null for connective prose.
+  - quote: an exact contiguous excerpt from that URL's text, copied word for
+    word, that states the claim's value together with the feature it belongs
+    to. Copy it from the page you cite, not from a related page or a navigation
+    sidebar, even when that text names the same version. Do not paraphrase and
+    do not join separate sentences. The quote must contain every number the
+    claim uses. Connective prose has quote null.
+  - For a table cell, text is the cell exactly as written (without the URL),
+    and the quote is the source sentence that supports that cell's value for
+    that vendor.
 
-Do not add facts. Do not remove the answer's structure. If there are no sources,
-return the original answer and an empty statements list.`;
+A version and its release date often appear in different source sentences.
+Then return two statements rather than one: every number in a statement must
+appear in that statement's quote. If the version heading and the date line are
+contiguous on the page, quote both ("# Python 3.15.0 ... Release date: Oct. 9,
+2026") so one statement can carry the version and the date.
+
+Order statements as the reader should see them. Write each one so it makes
+sense on its own: a rejected neighbour must not leave a dangling "it" or "that
+release". Omit a claim you cannot support rather than returning a statement for
+it. Do not add facts. Prefer readable magnitudes in prose ("$5.13 trillion",
+"1.2 million") over long digit strings; the verifier compares the value, not
+the spelling.
+If the answer turns on freshness (a live price, a current role, a release
+date), keep the source's own date or timestamp inside that sentence in one
+short phrase; do not add a separate list of dates.
+If there are no sources, return the original answer and an empty statements
+list.`;
 
 const CRITIC_SCHEMA = {
   type: "object",
@@ -73,9 +117,8 @@ const CRITIC_SCHEMA = {
           text: { type: "string" },
           url: { anyOf: [{ type: "string" }, { type: "null" }] },
           quote: { anyOf: [{ type: "string" }, { type: "null" }] },
-          supported: { type: "boolean" },
         },
-        required: ["text", "url", "quote", "supported"],
+        required: ["text", "url", "quote"],
         additionalProperties: false,
       },
     },
@@ -90,27 +133,8 @@ type CriticData = {
     text: string;
     url: string | null;
     quote: string | null;
-    supported: boolean;
   }>;
 };
-
-/** Remove a URL and its markdown wrapper, leaving no empty brackets behind. */
-function stripUrl(text: string, url: string): string {
-  const escaped = url.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return text
-    .replace(new RegExp(`\\[([^\\]]*)\\]\\(\\s*${escaped}\\s*\\)`, "g"), "$1")
-    .replace(new RegExp(`\\[\\s*${escaped}\\s*\\]`, "g"), "")
-    .split(url)
-    .join("");
-}
-
-/** Point an already-correct citation at the fetched URL without appending a
- * second fragment to it. A clean URL is a prefix of its tracked form. */
-function replaceUrl(text: string, from: string, to: string): string {
-  if (from === to) return text;
-  const escaped = from.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return text.replace(new RegExp(`${escaped}(?![\\w#?/.-])`, "g"), to);
-}
 
 export async function ground(
   llm: Llm,
@@ -118,14 +142,13 @@ export async function ground(
   sources: EnrichedSource[],
   question: string
 ): Promise<GroundResult> {
-  const allowed = new Set(sources.map((s) => s.url));
   const sourceBlock =
     sources
       .map(
-        (s) =>
-          `[${s.url}] ${s.title}` +
-          (s.publishedAt ? ` (published ${s.publishedAt})` : "") +
-          `\n${s.pageText ?? s.content}`
+        (source) =>
+          `[${source.url}] ${source.title}` +
+          (source.publishedAt ? ` (published ${source.publishedAt})` : "") +
+          `\n${source.pageText ?? source.content}`
       )
       .join("\n\n") || "(none)";
 
@@ -137,29 +160,10 @@ export async function ground(
       input: `QUESTION:\n${question}\n\nANSWER:\n${answer}\n\nSOURCES:\n${sourceBlock}`,
     });
 
-    let revised = expandInlineTables(data.revisedAnswer || answer);
-    // A URL the critic wrote that canonicalises to a retrieved page (tracking
-    // query, www, .md) is the same evidence: point the answer at the URL we
-    // actually fetched instead of stripping it. A URL we never retrieved is
-    // removed together with its markdown wrapper so no empty "[]" is left.
-    const retrieved = new Map(sources.map((s) => [canonicalUrl(s.url), s.url]));
-    const rewritten = new Set<string>();
-    for (const statement of data.statements ?? []) {
-      if (!statement.url || allowed.has(statement.url)) continue;
-      if (rewritten.has(statement.url)) continue;
-      rewritten.add(statement.url);
-      const match = retrieved.get(canonicalUrl(statement.url));
-      if (match) {
-        revised = replaceUrl(revised, statement.url, match);
-        statement.url = match;
-      } else {
-        revised = stripUrl(revised, statement.url);
-      }
-    }
-    const dropped = (data.statements ?? []).filter((s) => !s.supported).length;
-    if (dropped > 0 && !revised.includes("not stated in sources")) {
-      revised += "\n\nClaims not stated in sources were marked as such.";
-    }
+    const statements = data.statements ?? [];
+    const hasTable = answer
+      .split("\n")
+      .some((line) => line.trimStart().startsWith("|"));
 
     // Evidence is the union of the search snippet and the fetched page. A page
     // fetch can omit a section the snippet contained (or vice versa), and using
@@ -170,55 +174,105 @@ export async function ground(
       [source.content, source.pageText ?? ""]
         .filter((part) => part.trim() !== "")
         .join("\n");
-    const textByUrl = new Map<string, string>();
+
+    const byUrl = new Map<string, string>();
     for (const source of sources) {
       const key = canonicalUrl(source.url);
-      const previous = textByUrl.get(key);
+      const previous = byUrl.get(key);
       const text = sourceText(source);
-      textByUrl.set(key, previous ? `${previous}\n${text}` : text);
-    }
-    const evidence: SupportEvidence[] = [];
-    for (const statement of data.statements ?? []) {
-      if (!statement.url) continue;
-      const cited = textByUrl.get(canonicalUrl(statement.url));
-      if (cited === undefined) continue;
-      if (!("quote" in statement)) continue; // pre-quote stubs: keep old behaviour
-      const raw = typeof statement.quote === "string" ? statement.quote.trim() : "";
-      evidence.push({
-        url: statement.url,
-        text: statement.text ?? "",
-        quote:
-          raw !== "" && isVerbatimQuote(raw, cited)
-            ? raw
-            : "",
-      });
+      byUrl.set(key, previous ? `${previous}\n${text}` : text);
     }
 
-    // The critic's `supported` flags are a hint, not the contract: F-002 showed
-    // it marking unsupported table values as supported. Check each numeric
-    // claim against the retrieved text and replace what no source states.
-    // Runs before the date note so metadata dates are not graded as claims.
-    const support = guardValueSupport(
-      revised,
-      sources.map((source) => ({
-        url: source.url,
-        text: sourceText(source),
-      })),
-      evidence
+    const allowed = new Set(sources.map((source) => source.url));
+    const retrieved = new Map(
+      sources.map((source) => [canonicalUrl(source.url), source.url])
     );
-    revised = support.answer
-      // The critic can leave a qualifier in front of its own marker ("Up to
-      // not stated in sources"), which reads as if a ceiling survived.
-      .replace(
-        /\b(?:up to|as much as|about|around|nearly)\s+\*{0,2}not stated in sources\*{0,2}/gi,
-        "not stated in sources"
-      );
 
-    // Always state date visibility. F-006's rubric asks whether the cited
-    // source has a visible date, so silence is never an acceptable answer —
-    // even when some other source in the set did have one. Only dates present
-    // in the page text count as visible: Tavily's publishedAt is metadata, and
-    // listing it made the answer claim dates a reader could not see.
+    // A URL the critic wrote that canonicalises to a retrieved page is the same
+    // evidence: point the statement at the URL we actually fetched. A URL we
+    // never retrieved is not evidence and cannot verify a claim.
+    const verified: VerifiedStatement[] = statements.map((statement) => {
+      let url = statement.url;
+      if (url && !allowed.has(url)) {
+        const match = retrieved.get(canonicalUrl(url));
+        url = match ?? null;
+      }
+      const quote =
+        (statement.quote ?? "").trim() === "" ? null : statement.quote;
+      // An entry with no URL and no quote is only allowed when it introduces
+      // what follows (a heading or a lead-in ending in a colon). Numbers and
+      // prose sentences both require evidence: otherwise a statement could
+      // slip past verification by calling itself connective.
+      const connective =
+        statement.url === null &&
+        quote === null &&
+        claimMeasures(statement.text).length === 0 &&
+        isLeadIn(statement.text);
+      const cited = url ? byUrl.get(canonicalUrl(url)) : undefined;
+      return {
+        text: statement.text,
+        url,
+        quote,
+        supported:
+          connective ||
+          (url !== null &&
+            cited !== undefined &&
+            checkClaim(statement.text, quote, cited)),
+      };
+    });
+
+    let final: string;
+    let citedUrls: string[];
+    let droppedClaims: string[];
+
+    if (hasTable) {
+      // A markdown table already delimits its cells, so grading the rendered
+      // table is exact. Prose answers take the statement path below.
+      const applied = applyEvidence(
+        expandInlineTables(data.revisedAnswer || answer),
+        verified
+      );
+      final = dropSourcesBlock(applied.answer);
+      citedUrls = urlsIn(final)
+        .map((url) => retrieved.get(canonicalUrl(url)))
+        .filter((url): url is string => url !== undefined);
+      final = stripCitations(final);
+      droppedClaims = applied.dropped;
+    } else if (statements.length === 0) {
+      // The critic returned no prose entries. Keep the model's answer rather
+      // than turning a correct reply into "could not verify"; only remove
+      // citations that point outside the retrieved set.
+      final = dropSourcesBlock(stripCitations(answer));
+      citedUrls = urlsIn(answer)
+        .map((url) => retrieved.get(canonicalUrl(url)))
+        .filter((url): url is string => url !== undefined);
+      droppedClaims = [];
+    } else {
+      // The statements are the answer. There is no draft to split into
+      // sentences and no text to match back onto one, which is what lost
+      // verified Node.js and Python claims to a paraphrase and to "Oct.".
+      const kept = verified.filter((statement) => statement.supported);
+      final = dropSourcesBlock(stripCitations(assembleProse(kept)));
+      citedUrls = kept
+        .map((statement) => statement.url)
+        .filter((url): url is string => url !== null);
+      droppedClaims = verified
+        .filter((statement) => !statement.supported)
+        .map((statement) => statement.text);
+    }
+
+    // Losing every claim is a real outcome. Say so once, as its own sentence,
+    // rather than splicing a marker into prose that still cites a source.
+    if (final.trim() === "") {
+      final = "I could not verify this answer against the retrieved sources.";
+    }
+    final += sourcesSection(citedUrls, sources);
+
+    // Date visibility is trace metadata, not part of the reply. Only dates
+    // present in the page text count as visible: Tavily's publishedAt is
+    // metadata, and listing it made the answer claim dates a reader could not
+    // see. Keeping it here means the trace still explains a freshness decision
+    // without dumping it into the chat.
     const dated: string[] = [];
     const relative: string[] = [];
     for (const source of sources) {
@@ -239,13 +293,18 @@ export async function ground(
       dateParts.length > 0
         ? dateParts.join(" ")
         : "No publication date was visible in the retrieved sources.";
-    revised += `\n\n${note}`;
 
     return {
-      answer: revised.trim() || answer,
-      statements: (data.statements ?? []).length,
-      dropped,
-      replaced: support.replaced,
+      answer: final.trim(),
+      statements: statements.length,
+      dropped: verified.filter((statement) => !statement.supported).length,
+      droppedClaims,
+      checked: verified.map((statement) => ({
+        text: statement.text,
+        url: statement.url,
+        quote: statement.quote,
+        supported: statement.supported,
+      })),
       note,
       sources: sources.map((source) => ({
         url: source.url,
@@ -258,7 +317,8 @@ export async function ground(
       answer,
       statements: 0,
       dropped: 0,
-      replaced: [],
+      droppedClaims: [],
+      checked: [],
       note: null,
       error: err instanceof Error ? err.message : String(err),
       usage: { prompt: 0, completion: 0, total: 0 },

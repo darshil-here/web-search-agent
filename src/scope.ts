@@ -12,33 +12,46 @@ const SENTENCE = /(?<=[.!?])\s+/;
 const CLAUSE = /;\s+/;
 
 export function guardScope(question: string, answer: string): ScopeResult {
-  const parts = answer.split(SENTENCE);
-  const kept: string[] = [];
   const removed: string[] = [];
+  const keptLines: string[] = [];
 
-  for (const part of parts) {
-    const clauses = part.split(CLAUSE).filter((clause) => clause.trim() !== "");
-    if (clauses.length > 1) {
-      const keptClauses = clauses.filter(
-        (clause) => unaskedSibling(question, clause) === null
-      );
-      if (keptClauses.length === 0) {
-        removed.push(part);
-        continue;
-      }
-      removed.push(...clauses.filter((clause) => !keptClauses.includes(clause)));
-      kept.push(keptClauses.join("; "));
+  for (const line of answer.split("\n")) {
+    if (line.trim() === "") {
+      keptLines.push(line);
       continue;
     }
 
-    const sibling = unaskedSibling(question, part);
-    if (sibling && parts.length > 1) {
-      removed.push(part);
-    } else {
-      kept.push(part);
+    const parts = line.split(SENTENCE);
+    const kept: string[] = [];
+    for (const part of parts) {
+      const clauses = part.split(CLAUSE).filter((clause) => clause.trim() !== "");
+      if (clauses.length > 1) {
+        const keptClauses = clauses.filter(
+          (clause) => unaskedSibling(question, clause) === null
+        );
+        if (keptClauses.length === 0) {
+          removed.push(part);
+          continue;
+        }
+        removed.push(...clauses.filter((clause) => !keptClauses.includes(clause)));
+        kept.push(keptClauses.join("; "));
+        continue;
+      }
+
+      const sibling = unaskedSibling(question, part);
+      if (sibling && parts.length > 1) {
+        removed.push(part);
+      } else {
+        kept.push(part);
+      }
     }
+
+    // A line can lose every sentence (a bullet whose only claim was scope).
+    // Keep the line structure: bullets and paragraphs survive scope removal.
+    keptLines.push(kept.length > 0 ? kept.join(" ") : "");
   }
 
-  if (kept.length === 0) return { answer, removed: [] };
-  return { answer: kept.join(" ").trim(), removed };
+  const joined = keptLines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+  if (joined === "") return { answer, removed: [] };
+  return { answer: joined, removed };
 }

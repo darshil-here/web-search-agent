@@ -28,6 +28,7 @@ import {
 import { createFetch, selectUrls } from "./pages.js";
 import { extractSourceDate, relativeDateMention } from "./source-date.js";
 import { ground, needsGrounding } from "./critic.js";
+import { sourcesSection, stripCitations, urlsIn } from "./sources.js";
 import { guardScope } from "./scope.js";
 import { guardCalibration } from "./calibration.js";
 import { expandInlineTables } from "./markdown.js";
@@ -493,6 +494,11 @@ async function turn(
           ? "\n\nNo publication date was visible on the cited page; treat the details as current as of this conversation."
           : "\n\nNo publication date was visible in the retrieved sources.";
       }
+
+      // This path skipped the critic, not the citation cleanup: no raw URL may
+      // reach the bubble, and a URL already in the prose becomes a Source.
+      const citedUrls = urlsIn(answer);
+      answer = stripCitations(answer) + sourcesSection(citedUrls, rankedSources);
     }
 
     if (
@@ -504,7 +510,7 @@ async function turn(
       const urls = selectUrls(rankedSources, 2, config.maxPageFetches);
       status(
         "grounding",
-        `Grounding: fetching ${plural(urls.length, "source page")} to check the numbers`
+        `Grounding: fetching ${plural(urls.length, "source page")} to verify the claims`
       );
       const pages = await fetchPages(urls);
       const enriched: EnrichedSource[] = rankedSources.map((source) => {
@@ -535,16 +541,16 @@ async function turn(
           `Grounding check failed: ${grounded.error}; using the original answer`,
           "warn"
         );
-      } else if (grounded.replaced.length > 0) {
+      } else if (grounded.droppedClaims.length > 0) {
         status(
           "grounding",
-          `Grounding: replaced ${plural(
-            grounded.replaced.length,
-            "unsupported value"
-          )} with "not stated in sources"`
+          `Grounding: dropped ${plural(
+            grounded.droppedClaims.length,
+            "unverified claim"
+          )}`
         );
       } else {
-        status("grounding", "Grounding: every value is supported by a source");
+        status("grounding", "Grounding: every claim is supported by a quote");
       }
       answer = grounded.answer;
     }

@@ -58,7 +58,21 @@ test("critic and scope phases render in the trace", () => {
       answer: "revised",
       statements: 3,
       dropped: 1,
-      replaced: ["10 branches"],
+      droppedClaims: ["10 branches"],
+      checked: [
+        {
+          text: "Neon has 10 branches",
+          url: "https://neon.test/pricing",
+          quote: "Free: 10 branches per project.",
+          supported: false,
+        },
+        {
+          text: "Neon includes 1 GB of storage",
+          url: "https://neon.test/pricing",
+          quote: "Free: 1 GB of storage.",
+          supported: true,
+        },
+      ],
       note: "No publication date was visible in the retrieved sources.",
       usage: { prompt: 1, completion: 1, total: 2 },
     };
@@ -76,8 +90,11 @@ test("critic and scope phases render in the trace", () => {
     assert.match(text, /## Grounding critic/);
     assert.match(text, /## Scope/);
     assert.match(text, /critic_statements: 3/);
-    assert.match(text, /critic_replaced: 1/);
+    assert.match(text, /critic_dropped_claims: 1/);
     assert.match(text, /10 branches/);
+    assert.match(text, /### Statements/);
+    assert.match(text, /Free: 10 branches per project\./);
+    assert.match(text, /\| no \|/);
     assert.match(text, /scope_removed: 1/);
   } finally {
     rmSync(dir, { recursive: true, force: true });

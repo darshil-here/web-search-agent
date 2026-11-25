@@ -6,7 +6,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { format } from "node:util";
 import type { LlmCall, StopReason, ToolCall } from "./llm.js";
-import { flatten, pad2 } from "./text.js";
+import { clip, flatten, pad2 } from "./text.js";
 
 export type ClaimEvent = {
   extracted: number;
@@ -86,7 +86,15 @@ type Final = {
 export type CriticTrace = {
   statements: number;
   dropped: number;
-  replaced: string[];
+  /** The sentences or table cells removed because they did not verify. */
+  droppedClaims: string[];
+  /** Every statement, its quote and its verdict, for post-mortems. */
+  checked: Array<{
+    text: string;
+    url: string | null;
+    quote: string | null;
+    supported: boolean;
+  }>;
   note: string | null;
   /** Snippet + fetched page for each source the guard graded against. */
   sources?: Array<{ url: string; text: string }>;
@@ -356,7 +364,7 @@ export class Tracer {
       `answer_kind: ${this.finalInfo?.answerKind ?? "n/a"}`,
       `critic_statements: ${this.criticInfo?.statements ?? 0}`,
       `critic_dropped: ${this.criticInfo?.dropped ?? 0}`,
-      `critic_replaced: ${this.criticInfo?.replaced.length ?? 0}`,
+      `critic_dropped_claims: ${this.criticInfo?.droppedClaims.length ?? 0}`,
       `scope_removed: ${this.scopeInfo?.removed.length ?? 0}`,
       `calibration_rewrites: ${this.calibrationInfo?.rewritten.length ?? 0}`,
       "tokens:",
@@ -449,15 +457,32 @@ export class Tracer {
         "",
         "## Grounding critic",
         "",
-        "| statements | dropped | replaced | note |",
-        "|----------:|--------:|---------:|------|",
-        `| ${c.statements} | ${c.dropped} | ${c.replaced.length} | ${tableCell(c.note ?? "—")} |`,
+        "| statements | unverified | removed | note |",
+        "|----------:|-----------:|--------:|------|",
+        `| ${c.statements} | ${c.dropped} | ${c.droppedClaims.length} | ${tableCell(c.note ?? "—")} |`,
         ""
       );
-      for (const value of c.replaced) {
-        lines.push(`- replaced: ${tableCell(value)}`);
+      for (const value of c.droppedClaims) {
+        lines.push(`- dropped: ${tableCell(value)}`);
       }
-      if (c.replaced.length > 0) lines.push("");
+      if (c.droppedClaims.length > 0) lines.push("");
+      if (c.checked.length > 0) {
+        lines.push(
+          "### Statements",
+          "",
+          "| # | statement | source | quote | verified |",
+          "|--:|---|---|---|:--------:|"
+        );
+        c.checked.forEach((statement, index) => {
+          lines.push(
+            `| ${index + 1} | ${tableCell(clip(statement.text, 160))} | ` +
+              `${tableCell(statement.url ?? "—")} | ` +
+              `${tableCell(clip(statement.quote ?? "—", 160))} | ` +
+              `${statement.supported ? "yes" : "no"} |`
+          );
+        });
+        lines.push("");
+      }
       if (c.error) lines.push(`**Critic error:** ${c.error}`, "");
     }
 
