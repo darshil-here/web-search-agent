@@ -240,6 +240,20 @@ export function applyEvidence(
   };
 }
 
+/**
+ * A statement that carries no URL and no quote may only be a lead-in. A
+ * heading or a phrase ending in a colon introduces what follows; it does not
+ * assert anything about a product. Anything else must be evidenced, even when
+ * it states no number: otherwise a qualitative claim ("Neon is faster") could
+ * reach the reader through the connective-prose path without verification.
+ */
+export function isLeadIn(text: string): boolean {
+  const raw = flatten(text).trim();
+  if (raw === "") return false;
+  if (/^#{1,6}\s/.test(raw)) return true;
+  return raw.endsWith(":");
+}
+
 /** A markdown line that must stand on its own, not be merged into a paragraph. */
 function isBlockLine(text: string): boolean {
   return (

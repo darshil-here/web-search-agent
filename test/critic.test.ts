@@ -604,6 +604,34 @@ test("the trace records each statement, its quote and its verdict", async () => 
   assert.doesNotMatch(result.answer, /\$99/);
 });
 
+test("a url-less entry cannot bypass verification with a claim", async () => {
+  const result = await ground(
+    llmReturning({
+      revisedAnswer: "Neon is faster. Neon costs $19.",
+      statements: [
+        // No number, but an assertion about a product: not a lead-in.
+        { text: "Neon is faster than Supabase.", url: null, quote: null },
+        // A number in an entry pretending to be connective.
+        { text: "Neon costs $19.", url: null, quote: null },
+        // A genuine lead-in still survives.
+        { text: "Here is the pricing:", url: null, quote: null },
+      ],
+    }),
+    "Neon is faster. Neon costs $19.",
+    sources,
+    "How does Neon compare?"
+  );
+
+  assert.doesNotMatch(result.answer, /faster/);
+  assert.doesNotMatch(result.answer, /\$19/);
+  assert.match(result.answer, /Here is the pricing:/);
+  assert.deepEqual(
+    result.checked.map((item) => item.supported),
+    [false, false, true]
+  );
+  assert.equal(result.droppedClaims.length, 2);
+});
+
 test("ground keeps the original answer when the critic fails", async () => {
   const result = await ground(llmReturning({}, true), "Original.", sources, "Q");
   assert.equal(result.answer, "Original.");

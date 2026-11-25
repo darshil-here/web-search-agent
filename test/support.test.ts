@@ -9,6 +9,7 @@ import {
   assembleProse,
   checkClaim,
   claimMeasures,
+  isLeadIn,
   isVerbatimQuote,
   quoteStatesClaim,
   type VerifiedStatement,
@@ -259,4 +260,14 @@ test("a paragraph broken into sentences is joined with spaces", () => {
     statement("Volume fell."),
   ]);
   assert.equal(answer, "The price rose. Volume fell.");
+});
+
+// --- connective gate --------------------------------------------------------
+
+test("only a heading or a colon lead-in is connective", () => {
+  assert.equal(isLeadIn("Here are the latest stable releases:"), true);
+  assert.equal(isLeadIn("## Platform comparison"), true);
+  assert.equal(isLeadIn("In short."), false);
+  assert.equal(isLeadIn("Both vendors offer a free tier."), false);
+  assert.equal(isLeadIn("- **Node.js LTS:** 26.13.1."), false);
 });

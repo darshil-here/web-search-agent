@@ -15,6 +15,7 @@ import {
   assembleProse,
   checkClaim,
   claimMeasures,
+  isLeadIn,
   type VerifiedStatement,
 } from "./support.js";
 import { canonicalUrl } from "./url.js";
@@ -72,7 +73,9 @@ You are given the original answer and the sources that were retrieved. Return:
   - text: the sentence or bullet exactly as it should appear, WITHOUT a URL.
     Keep a bullet's "- " marker. Split separate claims into separate entries.
     Connective prose that makes no factual claim is an entry too, with url and
-    quote null.
+    quote null, but only a section heading or a lead-in that ends with a colon
+    qualifies. Any sentence that says something about a product needs its URL
+    and quote, even when it contains no number.
   - url: the source URL for the claim, or null for connective prose.
   - quote: an exact contiguous excerpt from that URL's text, copied word for
     word, that states the claim's value together with the feature it belongs
@@ -196,12 +199,15 @@ export async function ground(
       }
       const quote =
         (statement.quote ?? "").trim() === "" ? null : statement.quote;
-      // A statement with no URL, no quote and no number is connective prose:
-      // there is nothing to verify, and dropping it would tear the answer.
+      // An entry with no URL and no quote is only allowed when it introduces
+      // what follows (a heading or a lead-in ending in a colon). Numbers and
+      // prose sentences both require evidence: otherwise a statement could
+      // slip past verification by calling itself connective.
       const connective =
         statement.url === null &&
         quote === null &&
-        claimMeasures(statement.text).length === 0;
+        claimMeasures(statement.text).length === 0 &&
+        isLeadIn(statement.text);
       const cited = url ? byUrl.get(canonicalUrl(url)) : undefined;
       return {
         text: statement.text,
